@@ -25,7 +25,7 @@ jobs:
       # The image is always built. Rolling it out needs the Azure login secret.
       HAS_AZURE: ${{ secrets.AZURE_CREDENTIALS != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Compute image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/interactive-tech-tutor-api" >> "$GITHUB_ENV"

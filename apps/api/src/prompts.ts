@@ -69,17 +69,18 @@ export const ELEMENT_SYSTEM_PROMPT = `You design the animated canvas for ONE ste
 # Canvas
 - Coordinates are percentages of the canvas: x and y from 0 to 100, origin at the top-left. Keep every element inside 5-95 on both axes.
 - width and height are percentages too.
-- For circle and plot_point, (x, y) is the CENTER. For every other shape, (x, y) is the TOP-LEFT corner. Lines and arrows use x1,y1 -> x2,y2.
+- For circle and plot_point, (x, y) is the CENTER. For every other shape, (x, y) is the TOP-LEFT corner.
+- Give every shape a short unique "id" (e.g. "client", "n50", "cell3"). Connect shapes with arrows/lines that name them: {"type":"arrow","from":"client","to":"server"}. The renderer attaches the connector to the shapes' outlines, so do NOT give coordinates to connectors that join shapes.
 - Leave clear gaps. Shapes must not overlap, and captions go in free space.
 
 # Element types (use only these, with only these fields)
 rectangle         {x,y,width,height,label}                     boxes: components, stages, variables, array cells
 circle            {x,y,radius,label}                           nodes, states, points of interest
 bar               {x,y,width,height,label,orientation}         one bar of a chart; label is its numeric value; height encodes magnitude; bars in one chart share the same bottom edge (y + height)
-tree_node         {value,parent_value,label}                   one node of a binary search tree. NO x or y: the renderer lays the tree out. value is a number; parent_value is the parent's value (omit for the root)
-arrow             {x1,y1,x2,y2,label}                          directed flow or data movement
-line, dashed_line {x1,y1,x2,y2}                                relations
-curved_arrow      {x1,y1,x2,y2}
+tree_node         {value,parent_value,label}                   one node of a binary search tree. NO x or y: the renderer lays the tree out AND draws its edges, so never add lines or arrows between tree nodes. value is a number; parent_value is the parent's value (omit for the root)
+arrow             {from,to,label}                              directed flow or data movement between two shapes (ids)
+line, dashed_line {from,to,label}                              undirected relation between two shapes (ids)
+curved_arrow      {from,to,label}                              e.g. "replaces", "returns to"
 text              {x,y,width,height,label}                     short captions only (at most 6 words)
 matrix            {x,y,width,height,rows,cols,values}          values is a rows x cols array of numbers or short strings
 table             {x,y,width,height,headers,rows}              headers is string[], rows is string[][]
@@ -103,28 +104,30 @@ highlight_box     {x,y,width,height}                           translucent outli
 
 # Rules
 1. Draw what the subtitle says. Every number, name and relation it mentions appears as a labelled element.
-2. Draw each thing ONCE. Never place two elements at the same position. To show a change (swap, move, insertion, a value being passed on), animate that single element with move or swap and target_x/target_y: it starts at x,y and ends at the target after its delay. To swap A and B, give A a swap with B's position as target and B a swap with A's position.
-3. Show the state the subtitle begins with, then animate toward the state it ends with.
-4. The element the subtitle is currently about gets #FF6B35. When two things are compared, give them two clearly different colours.
-5. Pick the structure that fits: ordered values -> bars; hierarchy -> tree_node; flow or pipeline -> rectangles joined by arrows; grid -> matrix; relationship or function -> axis + plot_point + line; choice -> flowchart_diamond.
-6. Layout recipes:
+2. Every arrow and line must use "from" and "to" with ids of shapes in this step; never leave a connector floating.
+3. Draw each thing ONCE. Never place two elements at the same position. To show a change (swap, move, insertion, a value being passed on), animate that single element with move or swap and target_x/target_y: it starts at x,y and ends at the target after its delay. To swap A and B, give A a swap with B's position as target and B a swap with A's position.
+4. Show the state the subtitle begins with, then animate toward the state it ends with.
+5. The element the subtitle is currently about gets #FF6B35. When two things are compared, give them two clearly different colours.
+6. Pick the structure that fits: ordered values -> bars; hierarchy -> tree_node; flow or pipeline -> rectangles joined by arrows; grid -> matrix; relationship or function -> axis + plot_point + line; choice -> flowchart_diamond.
+7. Layout recipes:
    - A list or array of n values is ONE horizontal row of equal cells: width w = min(14, 70/n), gap 2, first x = (100 - n*w - (n-1)*2) / 2, y = 40. Bars in a row share the same bottom edge.
    - A pipeline runs left to right on one row at y of about 45, with arrows between boxes.
    - Captions sit above (y 8-15) or below (y 80-90) the main figure, never inside it.
-7. Use 6-10 elements, at least 3 of them not text. Arrows must connect elements that exist.
-8. Stay consistent with the visual plan and the other steps: same values, same names, same order.
-9. Reply with one JSON object {"elements":[ ... ]} and nothing else.
+8. Use 6-10 elements, at least 3 of them not text. Arrows must connect elements that exist.
+9. Stay consistent with the visual plan and the other steps: same values, same names, same order.
+10. Reply with one JSON object {"elements":[ ... ]} and nothing else.
 
 # Example
 Subtitle: "The array holds 5, 2 and 9. Merge sort compares 5 and 2, then swaps them so 2 comes first."
 Visual plan: Three bars 5, 2, 9 in a row; highlight 5 and 2, then swap those two bars.
 {"elements":[
 {"type":"text","x":25,"y":10,"width":50,"height":6,"label":"Compare and swap","color":"#64748B","animation":{"type":"fade_in","duration":500,"delay":0}},
-{"type":"bar","x":25,"y":35,"width":14,"height":30,"label":"5","color":"#FF6B35","label_position":"below","animation":{"type":"swap","duration":1200,"delay":5000,"target_x":45,"target_y":35}},
-{"type":"bar","x":45,"y":51,"width":14,"height":14,"label":"2","color":"#8B5CF6","label_position":"below","animation":{"type":"swap","duration":1200,"delay":5000,"target_x":25,"target_y":51}},
-{"type":"bar","x":65,"y":20,"width":14,"height":45,"label":"9","color":"#00D4FF","label_position":"below","animation":{"type":"fade_in","duration":600,"delay":1500}},
+{"id":"b5","type":"bar","x":25,"y":35,"width":14,"height":30,"label":"5","color":"#FF6B35","label_position":"below","animation":{"type":"swap","duration":1200,"delay":5000,"target_x":45,"target_y":35}},
+{"id":"b2","type":"bar","x":45,"y":51,"width":14,"height":14,"label":"2","color":"#8B5CF6","label_position":"below","animation":{"type":"swap","duration":1200,"delay":5000,"target_x":25,"target_y":51}},
+{"id":"b9","type":"bar","x":65,"y":20,"width":14,"height":45,"label":"9","color":"#00D4FF","label_position":"below","animation":{"type":"fade_in","duration":600,"delay":1500}},
 {"type":"highlight_box","x":22,"y":30,"width":40,"height":40,"color":"#FACC15","animation":{"type":"pulse","duration":900,"delay":2500}},
-{"type":"text","x":25,"y":82,"width":50,"height":6,"label":"5 > 2, so swap","color":"#FACC15","animation":{"type":"fade_in","duration":600,"delay":4000}}
+{"type":"text","x":25,"y":82,"width":50,"height":6,"label":"5 > 2, so swap","color":"#FACC15","animation":{"type":"fade_in","duration":600,"delay":4000}},
+{"type":"arrow","from":"b5","to":"b2","label":"compare","color":"#FACC15","animation":{"type":"draw","duration":700,"delay":3000}}
 ]}`;
 
 export function buildElementPrompt(args: {

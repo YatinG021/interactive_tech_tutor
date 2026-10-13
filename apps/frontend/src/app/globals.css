@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+/* Design tokens. The palette is shared with the simulation canvas (cyan, violet, signal orange) so
+   the product chrome and the generated diagrams read as one system. */
+@theme {
+  --color-ink-950: #05080f;
+  --color-ink-900: #080d18;
+  --color-ink-850: #0b1220;
+  --color-ink-800: #0f1829;
+  --color-ink-700: #16223a;
+  --color-ink-600: #22304d;
+  --color-line: rgb(148 163 184 / 0.14);
+  --color-line-strong: rgb(148 163 184 / 0.26);
+  --color-fg: #e8eef8;
+  --color-fg-muted: #93a3bd;
+  --color-fg-subtle: #64748b;
+
+  --color-cyan: #00d4ff;
+  --color-violet: #8b5cf6;
+  --color-signal: #ff6b35;
+  --color-mint: #22c55e;
+  --color-amber: #facc15;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-display: var(--font-instrument-serif), ui-serif, Georgia, serif;
+
+  --animate-marquee: marquee 38s linear infinite;
+  --animate-shimmer: shimmer 2.4s linear infinite;
+  --animate-float: float 7s ease-in-out infinite;
+
+  @keyframes marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+  @keyframes shimmer {
+    from { background-position: -200% 0; }
+    to { background-position: 200% 0; }
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+}
+
+html {
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--color-ink-950);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgb(0 212 255 / 0.28);
+}
+
+/* Blueprint grid used behind the hero and canvases. */
+.bg-blueprint {
+  background-image:
+    linear-gradient(rgb(148 163 184 / 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(148 163 184 / 0.07) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.bg-blueprint-fine {
+  background-image:
+    linear-gradient(rgb(148 163 184 / 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(148 163 184 / 0.06) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+.text-gradient {
+  background: linear-gradient(100deg, #e8eef8 10%, #7dd3fc 45%, #a78bfa 75%, #e8eef8 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.shimmer-line {
+  background: linear-gradient(90deg, transparent, rgb(0 212 255 / 0.55), transparent);
+  background-size: 200% 100%;
+  animation: var(--animate-shimmer);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}

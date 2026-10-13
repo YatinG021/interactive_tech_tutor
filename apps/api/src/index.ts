@@ -33,6 +33,7 @@ import {
   upsertProgress
 } from "./db.js";
 import { generateJson, generateText, isLlmConfigured } from "./llm.js";
+import { isTtsConfigured, synthesize, TtsError } from "./tts.js";
 import {
   buildChatPrompt,
   buildChatSystemPrompt,
@@ -76,13 +77,8 @@ const configuredOrigins = [
   .map((origin) => origin.trim())
   .filter(Boolean);
 const allowedOrigins = new Set([
-  "https://interactive-tech-tutor.vercel.app",
-  "https://master.d3kfpuqsbfsujm.amplifyapp.com",
-  "https://*.amplifyapp.com",
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
   ...configuredOrigins
 ]);
 const wildcardOriginRegexes = Array.from(allowedOrigins)
@@ -100,7 +96,8 @@ function isAllowedOrigin(origin: string): boolean {
 }
 const CACHE_VERSION = process.env.CACHE_VERSION?.trim() || "3";
 const SIMULATION_CACHE_TTL_MS = 1000 * 60 * 60 * 12;
-const SIMULATION_CACHE_SCHEMA_VERSION = `canvas-json-v4::v${CACHE_VERSION}`;
+// v5: shapes carry ids and connectors reference them (from/to); older cached entries are ignored.
+const SIMULATION_CACHE_SCHEMA_VERSION = `canvas-json-v5::v${CACHE_VERSION}`;
 // Persistent (SQLite) cache survives restarts and scale-to-zero; the in-memory layer is a hot copy.
 const SIMULATION_PERSISTED_TTL_MS = 1000 * 60 * 60 * Number(process.env.SIMULATION_CACHE_TTL_HOURS ?? 168);
 const simulationResponseCache = new Map<
@@ -164,7 +161,9 @@ const progressUpdateSchema = z.object({
   level: z.enum(["beginner", "intermediate", "advanced"]),
   status: z.enum(["not-started", "in-progress", "completed"]),
   score: z.number().min(0).max(100).default(0),
-  timeSpent: z.number().min(0).default(0)
+  timeSpent: z.number().min(0).default(0),
+  // Pass mark of the quiz the learner took (generated and curated topics have no seed problem set).
+  passingScore: z.number().min(50).max(95).optional()
 });
 
 const interactionSchema = z.object({
@@ -1993,8 +1992,14 @@ function ensureRenderableElementsForStep(topic: string, step: GeminiCanvasStep):
       if (isConnectorElementType(type)) {
         next.label = "";
       } else {
-        // An unlabeled shape stays unlabeled; inventing "circle 7" captions only adds noise.
-        next.label = rawLabel.trim() ? compressElementLabel(rawLabel, "Concept") : "";
+        // An unlabeled shape stays unlabeled; inventing "circle 7" captions only adds noise. A label made
+        // only of symbols (e.g. "?") is kept as the model wrote it rather than replaced with a word.
+        next.label = !rawLabel.trim()
+          ? ""
+          : type === "text"
+            ? // Captions are sentences; cutting them to 4 words left fragments like "ShopEasy uses LB1 to".
+              rawLabel.replace(/\s+/g, " ").trim().split(" ").slice(0, 10).join(" ").slice(0, 80)
+            : compressElementLabel(rawLabel, rawLabel.trim().slice(0, 12));
       }
 
       if (type === "plot_point") {
@@ -2185,7 +2190,9 @@ function enforceMeaningfulElementLabels(topic: string, steps: GeminiCanvasStep[]
         return [nextElement as GeminiCanvasElement];
       }
       if (skipPlaceholderLabelTypes.has(type)) {
-        return [];
+        // Connectors are often unlabeled; keep the connector and drop only the placeholder text.
+        nextElement.label = "";
+        return [nextElement as GeminiCanvasElement];
       }
       if (type === "tree_node") {
         const nodeValue = treeNodeNumericValue(nextElement);
@@ -3454,7 +3461,7 @@ app.post(
     const matchingProblemSet = PROBLEM_SETS.find(
       (problemSet) => problemSet.topicId === payload.topicId && problemSet.level === payload.level
     );
-    const passingScore = matchingProblemSet?.passingScore ?? 70;
+    const passingScore = matchingProblemSet?.passingScore ?? payload.passingScore ?? 70;
     const unlockedLevel =
       payload.status === "completed" && payload.score >= passingScore ? getNextLevel(payload.level) : null;
 
@@ -3682,12 +3689,26 @@ app.post(
   })
 );
 
+function resolveTopicTitle(topicId: string, topicTitle?: string): string {
+  const explicit = topicTitle?.trim();
+  if (explicit) {
+    return explicit.slice(0, 120);
+  }
+  const seeded = TOPICS.find((item) => item.id === topicId);
+  if (seeded) {
+    return seeded.title;
+  }
+  // Generated topics have ids like "custom-<timestamp>-<slug>"; recover the readable part.
+  return topicId.replace(/^custom-\d+-/, "").replace(/-/g, " ").trim() || topicId;
+}
+
 app.post(
   "/api/ai/chat",
   authMiddleware,
   asyncHandler(async (req: AuthenticatedRequest, res) => {
   const schema = z.object({
     topicId: z.string().min(1),
+    topicTitle: z.string().max(120).optional(),
     message: z.string().min(1),
     mode: z.enum(["voice", "text"]).default("text"),
     context: z
@@ -3708,7 +3729,7 @@ app.post(
 
   const { topicId, message, mode, context } = parsed.data;
   const topic = TOPICS.find((item) => item.id === topicId);
-  const topicTitle = topic?.title ?? topicId;
+  const topicTitle = resolveTopicTitle(topicId, parsed.data.topicTitle);
   let responseText = topic
     ? `In ${topic.title}, focus on this next: ${message.slice(0, 120)}. Try the current ${mode} prompt, then validate with the active problem set.`
     : `I can help with that question. Start by clarifying the current topic and desired difficulty level.`;
@@ -3745,6 +3766,7 @@ app.post(
   asyncHandler(async (req: AuthenticatedRequest, res) => {
   const schema = z.object({
     topicId: z.string().min(1),
+    topicTitle: z.string().max(120).optional(),
     userSpeech: z.string().min(1),
     stepConcept: z.string().min(1).default("Current step"),
     stepNumber: z.number().int().min(1).default(1)
@@ -3756,8 +3778,7 @@ app.post(
   }
 
   const { topicId, userSpeech, stepConcept, stepNumber } = parsed.data;
-  const topic = TOPICS.find((item) => item.id === topicId);
-  const topicTitle = topic?.title ?? topicId;
+  const topicTitle = resolveTopicTitle(topicId, parsed.data.topicTitle);
 
   try {
     const action = await analyzeVoiceAction(topicTitle, userSpeech, stepConcept, stepNumber);
@@ -3771,6 +3792,28 @@ app.post(
       feedback: "",
       requires_animation: false
     });
+  }
+  })
+);
+
+app.post(
+  "/api/tts",
+  authMiddleware,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
+  const parsed = z.object({ text: z.string().min(1).max(1500) }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid speech payload." });
+    return;
+  }
+  try {
+    const { audio, cached } = await synthesize(parsed.data.text);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Cache-Control", "private, max-age=604800");
+    res.setHeader("X-TTS-Cache", cached ? "hit" : "miss");
+    res.send(audio);
+  } catch (error) {
+    const status = error instanceof TtsError ? error.status : 502;
+    res.status(status).json({ error: (error as Error).message });
   }
   })
 );
@@ -3877,6 +3920,9 @@ async function startServer(): Promise<void> {
   console.log(`[DB] Removed ${expiredSessions} expired sessions and ${prunedCache} stale cache entries.`);
   if (!isLlmConfigured()) {
     console.warn("[LLM] Azure OpenAI is not configured; simulations will use the template fallback.");
+  }
+  if (!isTtsConfigured()) {
+    console.warn("[TTS] SARVAM_API_KEY is not set; narration will use the browser voice.");
   }
   app.listen(port, () => {
     console.log(`Interactive Tech Tutor API running on http://localhost:${port}`);

@@ -4,9 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "apps/web/**"
-      - "package.json"
-      - "package-lock.json"
+      - "apps/frontend/**"
       - ".github/workflows/deploy-frontend.yml"
   workflow_dispatch:
 
@@ -22,29 +20,34 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
+          # The frontend has its own lockfile, separate from the API's.
+          cache-dependency-path: apps/frontend/package-lock.json
 
       - run: npm ci
 
-      - name: Build site
-        run: npm --workspace apps/web run build
+      - name: Build static site
+        run: npm run build
         env:
-          VITE_API_URL: ${{ vars.API_BASE_URL }}
+          NEXT_PUBLIC_API_URL: ${{ vars.API_BASE_URL }}
           # Project site lives under /<repo>/ until a custom domain is attached.
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
 
-      - name: Prepare Pages artifact
-        run: touch apps/web/dist/.nojekyll
+      # GitHub Pages' Jekyll step drops folders starting with "_", which would remove _next/.
+      - run: touch out/.nojekyll
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
-          path: apps/web/dist
+          path: apps/frontend/out
 
   deploy:
     needs: build

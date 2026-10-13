@@ -17,6 +17,9 @@ Copy `apps/api/.env.example` to `apps/api/.env`.
 | `AZURE_OPENAI_TIMEOUT_MS` | No | `60000` | Per-request timeout |
 | `LLM_MAX_CONCURRENCY` | No | `6` | Max in-flight model calls for the whole process |
 | `AZURE_OPENAI_OVERFLOW_DEPLOYMENT` | No | unset | Second deployment used when the primary returns 429 or 5xx |
+| `SARVAM_API_KEY` | No | unset | Sarvam AI key for natural narration (`/api/tts`); without it the browser voice is used |
+| `SARVAM_TTS_MODEL` / `SARVAM_TTS_SPEAKER` | No | `bulbul:v4-flash` / `simran_en_edtech` | Voice model and persona |
+| `TTS_DAILY_CHAR_LIMIT` | No | `8000` | Characters sent to Sarvam per UTC day; cached clips don't count |
 | `JWT_SECRET` | Yes in production | dev value | Signs session tokens. The server refuses to start without it when `NODE_ENV=production` |
 | `DATA_DIR` | No | `./data` | Directory holding `app.db`. In Azure, the mounted Azure Files share (`/data`) |
 | `CACHE_VERSION` | No | `3` | Bump to invalidate every cached simulation |
@@ -39,6 +42,7 @@ Everything lives in `${DATA_DIR}/app.db`:
 | `progress` | Completion status per user, topic and level |
 | `history` | Interaction history, deleted per topic on request |
 | `simulation_cache` | Generated simulations, shared across users and restarts |
+| `tts_cache` | Narration audio (MP3) by model, voice and text |
 
 The schema is created automatically at startup. There is nothing to provision.
 
@@ -79,6 +83,7 @@ A cold 6-step simulation takes about 20 seconds; a cached one returns in millise
 | POST | `/api/ai/simulation` | yes | Generate or fetch a simulation |
 | POST | `/api/ai/chat` | yes | Tutor reply |
 | POST | `/api/ai/voice-action` | yes | Map speech to a simulation command |
+| POST | `/api/tts` | yes | Natural-voice narration audio (cached) |
 
 ## 5. Run locally
 
@@ -86,7 +91,7 @@ A cold 6-step simulation takes about 20 seconds; a cached one returns in millise
 npm install
 cp apps/api/.env.example apps/api/.env   # fill in the Azure OpenAI values
 npm run dev:api                          # http://localhost:4000
-npm run dev:web                          # http://localhost:5173
+npm run dev:frontend                     # http://localhost:3000
 curl localhost:4000/health
 ```
 

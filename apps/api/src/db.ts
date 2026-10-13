@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS idx_history_user_topic ON history(user_id, topic_id, timestamp);
 
+CREATE TABLE IF NOT EXISTS tts_cache (
+  cache_key  TEXT PRIMARY KEY,
+  audio      BLOB NOT NULL,
+  chars      INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tts_created ON tts_cache(created_at);
+
 CREATE TABLE IF NOT EXISTS simulation_cache (
   cache_key  TEXT PRIMARY KEY,
   payload    TEXT NOT NULL,
@@ -418,4 +426,27 @@ export function importStore(store: StoreData): void {
       );
     }
   })();
+}
+
+// ---------- text-to-speech cache ----------
+
+export function getCachedSpeech(cacheKey: string): Buffer | null {
+  const row = getDb().prepare("SELECT audio FROM tts_cache WHERE cache_key = ?").get(cacheKey) as
+    | { audio: Buffer }
+    | undefined;
+  return row ? row.audio : null;
+}
+
+export function putCachedSpeech(cacheKey: string, audio: Buffer, chars: number): void {
+  getDb()
+    .prepare("INSERT OR REPLACE INTO tts_cache (cache_key, audio, chars, created_at) VALUES (?, ?, ?, ?)")
+    .run(cacheKey, audio, chars, Date.now());
+}
+
+/** Characters actually sent to the TTS provider since the given time (cache hits cost nothing). */
+export function speechCharsSince(sinceMs: number): number {
+  const row = getDb().prepare("SELECT COALESCE(SUM(chars), 0) AS total FROM tts_cache WHERE created_at >= ?").get(sinceMs) as {
+    total: number;
+  };
+  return row.total;
 }
