@@ -7,8 +7,7 @@
 **/*.db-journal
 .git
 .github
-apps/web/*
-!apps/web/package.json
+apps/frontend
 apps/api/data
 apps/api/backups
 **/.DS_Store

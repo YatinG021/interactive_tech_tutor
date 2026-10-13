@@ -1,209 +1,51 @@
-# Interactive Tech Tutor 🎓
+# Interactive Tech Tutor
 
-An AI-powered interactive learning platform that generates real-time visual simulations with voice narration for any technical topic — built on AWS.
+Type any technical topic and watch it explained as a narrated, animated, step-by-step simulation. Steer it by voice, ask a tutor follow-up questions, and pass a quiz at each of three levels.
 
-🌐 **Live Demo:** https://master.d3kfpuqsbfsujm.amplifyapp.com
+- **Live site:** https://yating021.github.io/interactive_tech_tutor/
+- **API:** https://itt-api.orangefield-ee93915e.koreacentral.azurecontainerapps.io (`/health`)
 
----
+## What it does
 
-## What It Does
+- **Generated simulations.** Any topic becomes 6–8 animated diagram steps with narration and subtitles (about 20–40 s the first time, instant afterwards).
+- **Curated simulations.** Five hand-built lessons with exact diagrams and topic-specific quizzes: binary search, binary search trees, Dijkstra's shortest path, the TLS 1.3 handshake, and virtual memory.
+- **Natural narration.** Steps are read aloud with a Sarvam Bulbul voice; each clip is generated once and cached. The browser voice is the fallback.
+- **Voice control.** "Next", "go to step 3", "pause", "move the resolver to the right".
+- **Tutor chat.** Short, on-topic answers in text or voice.
+- **Practice and progress.** Three levels per topic; passing one unlocks the next.
 
-Interactive Tech Tutor lets you learn any technical concept through:
-
-- **AI-Generated Visual Simulations** — Type any topic (binary search tree, bubble sort, neural networks, etc.) and the app instantly generates a step-by-step animated simulation with canvas diagrams
-- **Voice Narration** — Each simulation step is narrated aloud with complete, accurate explanations
-- **Voice Commands** — Control the simulation hands-free: say "go to step 3", "pause", "repeat" and the app responds
-- **Topic Chat** — Ask follow-up questions about the topic and get instant AI tutor responses
-- **3D Visualizations** — 3D topics (cube rotation, molecular structures) render with Three.js overlays
-
----
-
-## AWS Architecture
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        User Browser                         │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   AWS Amplify (Frontend)                    │
-│              React + Vite + TypeScript                      │
-│         https://master.d3kfpuqsbfsujm.amplifyapp.com        │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ HTTPS API calls
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Node.js / Express API                     │
-│                      (Render.com)                           │
-└────────┬──────────────────┬────────────────────┬────────────┘
-         │                  │                    │
-         ▼                  ▼                    ▼
-┌─────────────┐   ┌──────────────────┐  ┌──────────────────┐
-│  AWS Bedrock│   │   AWS DynamoDB   │  │     AWS S3       │
-│  Nova Pro   │   │                  │  │                  │
-│             │   │ - itt-users      │  │ Simulation Cache │
-│• Simulation │   │ - itt-sessions   │  │ (JSON responses) │
-│  generation │   │ - itt-simulation │  │                  │
-│• Chat AI    │   │   -history       │  │                  │
-│• Fact check │   │                  │  │                  │
-└─────────────┘   └──────────────────┘  └──────────────────┘
+GitHub Pages (Next.js static export)  ──HTTPS──▶  Azure Container Apps (Express API, scales to zero)
+                                                    ├─ Azure OpenAI: gpt-4.1-mini (primary), gpt-5-mini (overflow)
+                                                    ├─ Sarvam AI: bulbul:v4-flash text-to-speech
+                                                    └─ SQLite on an Azure Files share (/data)
 ```
 
-### AWS Services Used
+| Part | Where | Notes |
+|---|---|---|
+| `apps/frontend` | GitHub Pages | Next.js 16, React 19, Tailwind 4, Motion. Has its own `node_modules` and lockfile. |
+| `apps/api` | Azure Container Apps (Korea Central) | Express + TypeScript, image in GHCR |
+| Data | Azure Files | One SQLite file: users, sessions, preferences, progress, history, simulation and audio caches |
 
-| Service | Purpose |
-|---|---|
-| **AWS Amplify** | Frontend hosting with CI/CD from GitHub |
-| **AWS Bedrock (Nova Pro)** | AI simulation generation, fact-checking, chat responses |
-| **AWS DynamoDB** | User accounts, sessions, simulation history |
-| **AWS S3** | Simulation response caching for fast repeat loads |
+Every push to `main` deploys automatically: `.github/workflows/deploy-backend.yml` (build image → roll out → smoke-test `/health` for the new commit) and `.github/workflows/deploy-frontend.yml` (static build → Pages).
 
----
-
-## Features
-
-### 🎬 AI Simulation Generation
-- Generates 8–12 step visual simulations for any technical topic
-- Canvas renderer draws tree nodes, bars, circles, arrows, matrices, flowcharts
-- Each step has proportional visuals matching the narration
-- Factually accurate — BST traversals, sorting comparisons, algorithm steps
-
-### 🎤 Voice Control
-- Web Speech API for real-time voice recognition
-- Natural language commands: "go to step 4", "pause", "repeat"
-- Voice narration via Speech Synthesis API
-- Mic button in navbar with visual on/off states
-
-### 🌳 Data Structure Visualizations
-- **Binary Search Tree** — hierarchical node layout with parent-child connections
-- **Sorting Algorithms** — animated bars with proportional heights growing from baseline
-- **Graphs & Trees** — automatic layout based on BST ordering
-- **Matrices** — labeled quadrant diagrams (confusion matrix, etc.)
-
-### 🧊 3D Visualizations
-- Three.js overlay for 3D topics
-- Rotating cube, sphere, cylinder, cone, torus
-- Injected automatically based on topic keywords
-
-### 💬 Topic Chat
-- Context-aware AI tutor chat per topic
-- Last 5 messages sent as context for coherent conversation
-- Timestamps on all messages (24-hour format)
-
-### 👤 User Authentication
-- Register with name, email, password
-- JWT-based sessions stored in DynamoDB
-- Simulation history tracked per user
-
----
-
-## Tech Stack
-
-**Frontend**
-- React 18 + TypeScript
-- Vite
-- Three.js (3D rendering)
-- Web Speech API (voice)
-- Canvas API (2D simulation rendering)
-
-**Backend**
-- Node.js + Express
-- TypeScript
-- AWS SDK v3
-
-**AWS**
-- Amplify (hosting)
-- Bedrock / Nova Pro (AI)
-- DynamoDB (database)
-- S3 (cache)
-
----
-
-## Local Development
-
-### Prerequisites
-- Node.js 18+
-- AWS account with Bedrock, DynamoDB, S3 access
-- AWS credentials configured
-
-### Setup
+## Run locally
 
 ```bash
-# Clone the repo
-git clone https://github.com/arnav4561/interactive-tech-tutor
-cd interactive-tech-tutor
+npm install                              # API dependencies (root workspace)
+npm --prefix apps/frontend install       # frontend dependencies (separate)
 
-# Install dependencies
-npm install
+cp apps/api/.env.example apps/api/.env   # add Azure OpenAI and (optionally) Sarvam keys
+echo "NEXT_PUBLIC_API_URL=http://localhost:4000/api" > apps/frontend/.env.local
 
-# Configure environment variables
-cp apps/api/.env.example apps/api/.env
-# Fill in: AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-# Fill in: S3_BUCKET_NAME, DYNAMODB_TABLE_PREFIX=itt
-
-cp apps/web/.env.example apps/web/.env
-# Fill in: VITE_API_URL=http://localhost:10000
-
-# Start development servers
-npm run dev --workspace apps/api
-npm run dev --workspace apps/web
+npm run dev:api                          # http://localhost:4000
+npm run dev:frontend                     # http://localhost:3000
 ```
 
-### Environment Variables
+## Documentation
 
-**Backend (`apps/api/.env`)**
-```
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-S3_BUCKET_NAME=interactive-tech-tutor-cache
-DYNAMODB_TABLE_PREFIX=itt
-JWT_SECRET=your_jwt_secret
-CACHE_VERSION=27
-PORT=10000
-```
-
-**Frontend (`apps/web/.env`)**
-```
-VITE_API_URL=http://localhost:10000
-```
-
----
-
-## How It Works
-
-1. **User enters a topic** — e.g. "binary search tree"
-2. **Backend calls AWS Bedrock** (Nova Pro) to generate a structured simulation with 8–12 steps, each with a subtitle and canvas elements
-3. **Response is cached in S3** for instant repeat loads
-4. **Frontend renders the simulation** on an HTML Canvas, drawing tree nodes, bars, arrows etc. step by step
-5. **Voice narration reads each subtitle** aloud while the canvas animates
-6. **User can ask questions** in the chat panel — backend calls Bedrock again with topic context to generate tutor responses
-7. **All user data** (account, sessions, history) is stored in DynamoDB
-
----
-
-## Project Structure
-
-```
-interactive-tech-tutor/
-├── apps/
-│   ├── api/                 # Node.js Express backend
-│   │   └── src/
-│   │       ├── index.ts     # Main API server
-│   │       ├── auth.ts      # JWT auth middleware
-│   │       └── store.ts     # Data store utilities
-│   └── web/                 # React frontend
-│       └── src/
-│           ├── App.tsx              # Main app component
-│           ├── SimulationCanvasRenderer.ts  # Canvas rendering engine
-│           └── styles.css           # Global styles
-├── package.json             # Monorepo root
-└── README.md
-```
-
----
-
-## License
-
-MIT
+- [docs/API_REFERENCE.md](docs/API_REFERENCE.md): every endpoint with request and response shapes
+- [docs/UI_UX_PROMPT.md](docs/UI_UX_PROMPT.md): the design and product spec for the frontend
+- [BACKEND_SETUP_GUIDE.md](BACKEND_SETUP_GUIDE.md): configuration, data layout and production checklist

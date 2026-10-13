@@ -5,7 +5,6 @@ dist
 apps/api/data/store.json
 apps/api/backups/*.json
 
-.vercel
 .run-logs
 
 .DS_Store

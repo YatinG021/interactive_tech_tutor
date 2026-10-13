@@ -3,13 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "apps/api",
-    "apps/web"
+    "apps/api"
   ],
   "scripts": {
     "dev:api": "npm --workspace apps/api run dev",
-    "dev:web": "npm --workspace apps/web run dev",
-    "build": "npm --workspace apps/api run build && npm --workspace apps/web run build",
+    "dev:frontend": "npm --prefix apps/frontend run dev",
+    "build": "npm --workspace apps/api run build && npm --prefix apps/frontend run build",
     "start:api": "npm --workspace apps/api run start",
     "backup:export": "npm --workspace apps/api run backup:export",
     "backup:import": "npm --workspace apps/api run backup:import --"
