@@ -120,7 +120,7 @@ interface SimulationGenerationApiResponse {
   topic: Topic;
   problemSets: ProblemSet[];
   openingMessage: string;
-  generationSource?: "template" | "bedrock";
+  generationSource?: "template" | "ai";
   explanation_script: string;
   simulation_steps: SimulationCanvasStep[];
 }
@@ -128,7 +128,7 @@ interface SimulationGenerationApiResponse {
 interface GeneratedSimulation {
   explanationScript: string;
   steps: SimulationCanvasStep[];
-  generationSource: "template" | "bedrock";
+  generationSource: "template" | "ai";
 }
 
 interface VoiceActionResponse {
@@ -824,7 +824,7 @@ export default function App(): JSX.Element {
         [response.topic.id]: {
           explanationScript: response.explanation_script,
           steps: injectedSteps,
-          generationSource: response.generationSource === "template" ? "template" : "bedrock"
+          generationSource: response.generationSource === "template" ? "template" : "ai"
         }
       }));
       console.log(

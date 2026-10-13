@@ -1,15 +1,13 @@
-import dotenv from "dotenv";
-dotenv.config({ override: false });
+import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express from "express";
-import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import { CreateTableCommand, DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { z } from "zod";
 import { authMiddleware, AuthenticatedRequest, createToken, hashPassword } from "./auth.js";
+import { generateJson, generateText, isLlmConfigured } from "./llm.js";
 import { LEVELS, PROBLEM_SETS, TOPICS } from "./seed.js";
 import { readStore, updateStore } from "./store.js";
 import {
@@ -65,19 +63,6 @@ function isAllowedOrigin(origin: string): boolean {
 const CACHE_VERSION = process.env.CACHE_VERSION?.trim() || "3";
 const SIMULATION_CACHE_TTL_MS = 1000 * 60 * 60 * 12;
 const SIMULATION_CACHE_SCHEMA_VERSION = `canvas-json-v3::v${CACHE_VERSION}`;
-const bedrockRegion = process.env.AWS_BEDROCK_REGION?.trim() || process.env.AWS_REGION?.trim() || "us-west-2";
-const bedrockClient = new BedrockRuntimeClient({
-  region: bedrockRegion,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!
-  },
-  requestHandler: new NodeHttpHandler({
-    connectionTimeout: 60000,
-    requestTimeout: 60000
-  })
-});
-
 const s3Client = new S3Client({
   region: process.env.AWS_REGION || "us-east-1",
   credentials: {
@@ -111,7 +96,7 @@ const simulationResponseCache = new Map<
       topic: Topic;
       problemSets: ProblemSet[];
       openingMessage: string;
-      generationSource: "template" | "bedrock";
+      generationSource: "template" | "ai";
       explanation_script: string;
       simulation_steps: unknown[];
     };
@@ -301,10 +286,7 @@ async function appendHistorySafely(interaction: InteractionRecord): Promise<void
   }
 }
 
-type BedrockJsonRequestOptions = {
-  topicKey?: string;
-  useCache?: boolean;
-  saveCache?: boolean;
+type LlmJsonRequestOptions = {
   maxTokens?: number;
   temperature?: number;
 };
@@ -322,78 +304,9 @@ async function saveSimulationS3Cache(topicKey: string, payload: unknown): Promis
   console.log(`Cached simulation for topic: ${topicKey}`);
 }
 
-async function requestBedrockJson(prompt: string, options: BedrockJsonRequestOptions = {}) {
-  const {
-    topicKey,
-    useCache = true,
-    saveCache = true,
-    maxTokens = 8000,
-    temperature = 0
-  } = options;
-  const canUseCache = Boolean(topicKey) && useCache;
-  const canSaveCache = Boolean(topicKey) && saveCache;
-
-  // Check S3 cache first if topic key provided
-  if (canUseCache && topicKey) {
-    try {
-      const cacheKey = getSimulationS3CacheKey(topicKey);
-      const s3Response = await s3Client.send(
-        new GetObjectCommand({
-          Bucket: S3_BUCKET,
-          Key: cacheKey
-        })
-      );
-      const cached = await s3Response.Body?.transformToString();
-      if (cached) {
-        console.log(`Cache hit for topic: ${topicKey}`);
-        return JSON.parse(cached);
-      }
-    } catch (_error) {
-      console.log("No cache found, calling Bedrock...");
-    }
-  }
-
-  // Call Bedrock
-  const body = JSON.stringify({
-    messages: [{ role: "user", content: [{ text: prompt }] }],
-    inferenceConfig: {
-      maxTokens,
-      temperature
-    }
-  });
-  const command = new InvokeModelCommand({
-    modelId: "us.amazon.nova-pro-v1:0",
-    contentType: "application/json",
-    accept: "application/json",
-    body
-  });
-
-  let response;
-  try {
-    response = await bedrockClient.send(command);
-  } catch (error) {
-    console.error("[Bedrock invoke failed]", {
-      region: bedrockRegion,
-      modelId: "us.amazon.nova-pro-v1:0",
-      error
-    });
-    throw error;
-  }
-  const responseBody = JSON.parse(new TextDecoder().decode(response.body as Uint8Array));
-  const text = responseBody.output?.message?.content?.[0]?.text ?? "";
-  const clean = String(text).replace(/```json|```/g, "").trim();
-  const parsed = JSON.parse(clean);
-
-  // Save to S3 cache if topic key provided
-  if (canSaveCache && topicKey) {
-    try {
-      await saveSimulationS3Cache(topicKey, parsed);
-    } catch (e) {
-      console.log("S3 cache save failed, continuing anyway:", e);
-    }
-  }
-
-  return parsed;
+async function requestLlmJson(prompt: string, options: LlmJsonRequestOptions = {}) {
+  const { maxTokens = 8000, temperature = 0 } = options;
+  return generateJson(prompt, { maxTokens, temperature });
 }
 
 const registerSchema = z.object({
@@ -2341,9 +2254,7 @@ ${JSON.stringify(current)}
 `.trim();
 
     try {
-      const payload = await requestBedrockJson(improvePrompt, {
-        useCache: false,
-        saveCache: false,
+      const payload = await requestLlmJson(improvePrompt, {
         maxTokens: 2400,
         temperature: 0.1
       });
@@ -2425,9 +2336,7 @@ Hard requirements:
 `.trim();
 
   try {
-    const payload = await requestBedrockJson(prompt, {
-      useCache: false,
-      saveCache: false,
+    const payload = await requestLlmJson(prompt, {
       maxTokens: 8000,
       temperature: 0
     });
@@ -3251,9 +3160,9 @@ async function generateSimulationFromGemini(
   topic: string,
   level: DifficultyLevel
 ): Promise<GeminiSimulationPayload> {
-  if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
+  if (!isLlmConfigured()) {
     throw new Error(
-      "Bedrock is not configured. Missing AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY."
+      "Azure OpenAI is not configured. Missing AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY or AZURE_OPENAI_DEPLOYMENT."
     );
   }
 
@@ -3321,10 +3230,7 @@ Fidelity rules:
 - Every step must include at least 2 non-text visual elements that directly represent the subtitle concept.
 `.trim();
 
-  const payload = await requestBedrockJson(simulationFormatPrompt, {
-    topicKey: topic,
-    useCache: false,
-    saveCache: false,
+  const payload = await requestLlmJson(simulationFormatPrompt, {
     maxTokens: 8000,
     temperature: 0
   });
@@ -3340,7 +3246,7 @@ Fidelity rules:
   }
 
   if (generatedSteps.length === 0) {
-    throw new Error("Simulation generation failed: Bedrock did not return valid steps.");
+    throw new Error("Simulation generation failed: the model did not return valid steps.");
   }
 
   const hasTreeNodes = generatedSteps.some((step) =>
@@ -3568,36 +3474,14 @@ Current user question: "${message}"
 Return plain text only.
 `.trim();
 
-  const body = JSON.stringify({
-    messages: [{ role: "user", content: [{ text: prompt }] }],
-    inferenceConfig: {
-      maxTokens: 1200,
-      temperature: 0.3
-    }
-  });
-  const command = new InvokeModelCommand({
-    modelId: "us.amazon.nova-pro-v1:0",
-    contentType: "application/json",
-    accept: "application/json",
-    body
-  });
-
-  const response = await bedrockClient.send(command);
-  const responseBody = JSON.parse(new TextDecoder().decode(response.body as Uint8Array)) as {
-    output?: {
-      message?: {
-        content?: Array<{ text?: string }>;
-      };
-    };
-  };
-  const text = responseBody.output?.message?.content?.map((part) => part.text ?? "").join(" ").trim();
+  const text = (await generateText(prompt, { maxTokens: 1200, temperature: 0.3 })).trim();
   if (!text) {
     return null;
   }
   return text.slice(0, 900);
 }
 
-async function analyzeVoiceActionWithNova(
+async function analyzeVoiceAction(
   topicTitle: string,
   userSpeech: string,
   stepConcept: string,
@@ -3628,25 +3512,7 @@ Respond with ONLY valid JSON containing:
 Output only valid JSON with no extra text.
 `.trim();
 
-  const body = JSON.stringify({
-    messages: [{ role: "user", content: [{ text: prompt }] }],
-    inferenceConfig: {
-      maxTokens: 200,
-      temperature: 0.1
-    }
-  });
-  const command = new InvokeModelCommand({
-    modelId: "us.amazon.nova-pro-v1:0",
-    contentType: "application/json",
-    accept: "application/json",
-    body
-  });
-
-  const response = await bedrockClient.send(command);
-  const responseBody = JSON.parse(new TextDecoder().decode(response.body as Uint8Array));
-  const text = responseBody.output?.message?.content?.[0]?.text ?? "";
-  const clean = String(text).replace(/```json|```/g, "").trim();
-  const parsed = extractJsonObject(clean) as Record<string, unknown>;
+  const parsed = (await generateJson(prompt, { maxTokens: 200, temperature: 0.1 })) as Record<string, unknown>;
 
   return {
     action_type: typeof parsed.action_type === "string" ? parsed.action_type : "general_answer",
@@ -4076,7 +3942,7 @@ app.post(
   let explanationScript = "";
   let simulationSteps: GeminiCanvasStep[] = [];
   let openingMessage = `Generated a live simulation plan for ${topic.title}.`;
-  let generationSource: "template" | "bedrock" = "bedrock";
+  let generationSource: "template" | "ai" = "ai";
   let geminiError = "";
   try {
     const llmGenerated = await generateSimulationFromGemini(requestedTopic, level);
@@ -4215,7 +4081,7 @@ app.post(
   const topicTitle = topic?.title ?? topicId;
 
   try {
-    const action = await analyzeVoiceActionWithNova(topicTitle, userSpeech, stepConcept, stepNumber);
+    const action = await analyzeVoiceAction(topicTitle, userSpeech, stepConcept, stepNumber);
     res.json(action);
   } catch (error) {
     console.error("Voice action fallback:", error);

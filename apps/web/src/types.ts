@@ -128,7 +128,7 @@ export interface SimulationGenerationResponse {
   topic: Topic;
   problemSets: ProblemSet[];
   openingMessage: string;
-  generationSource?: "template" | "bedrock";
+  generationSource?: "template" | "ai";
   explanation_script: string;
   simulation_steps: SimulationStep[];
 }
