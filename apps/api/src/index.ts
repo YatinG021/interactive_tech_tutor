@@ -2,14 +2,52 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express from "express";
-import { CreateTableCommand, DescribeTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { z } from "zod";
-import { authMiddleware, AuthenticatedRequest, createToken, hashPassword } from "./auth.js";
+import {
+  assertAuthConfigured,
+  authMiddleware,
+  AuthenticatedRequest,
+  createToken,
+  hashPassword,
+  saveSession,
+  verifyPassword
+} from "./auth.js";
+import {
+  addHistory,
+  createUser,
+  deleteExpiredSessions,
+  deleteHistoryByTopic,
+  ensurePreferences,
+  findUserByEmail,
+  getCachedSimulation,
+  initDb,
+  inTransaction,
+  insertProgressIfMissing,
+  listHistory,
+  listProgress,
+  getPreferences,
+  pruneSimulationCache,
+  putCachedSimulation,
+  touchLastLogin,
+  upsertPreferences,
+  upsertProgress
+} from "./db.js";
 import { generateJson, generateText, isLlmConfigured } from "./llm.js";
+import {
+  buildChatPrompt,
+  buildChatSystemPrompt,
+  buildElementPrompt,
+  buildImproveStepPrompt,
+  buildOutlinePrompt,
+  buildVoiceActionPrompt,
+  ELEMENT_SYSTEM_PROMPT,
+  OUTLINE_SCHEMA,
+  OUTLINE_SYSTEM_PROMPT,
+  OutlineStep,
+  VOICE_ACTION_SCHEMA,
+  VOICE_ACTION_SYSTEM_PROMPT
+} from "./prompts.js";
 import { LEVELS, PROBLEM_SETS, TOPICS } from "./seed.js";
-import { readStore, updateStore } from "./store.js";
 import {
   DifficultyLevel,
   InteractionRecord,
@@ -62,32 +100,9 @@ function isAllowedOrigin(origin: string): boolean {
 }
 const CACHE_VERSION = process.env.CACHE_VERSION?.trim() || "3";
 const SIMULATION_CACHE_TTL_MS = 1000 * 60 * 60 * 12;
-const SIMULATION_CACHE_SCHEMA_VERSION = `canvas-json-v3::v${CACHE_VERSION}`;
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION || "us-east-1",
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!
-  }
-});
-
-const S3_BUCKET = process.env.AWS_S3_BUCKET || "interactive-tech-tutor-cache";
-const DYNAMODB_TABLE_PREFIX = process.env.DYNAMODB_TABLE_PREFIX?.trim() || "itt";
-const DYNAMODB_USERS_TABLE = `${DYNAMODB_TABLE_PREFIX}-users`;
-const DYNAMODB_SESSIONS_TABLE = `${DYNAMODB_TABLE_PREFIX}-sessions`;
-const DYNAMODB_SIM_HISTORY_TABLE = `${DYNAMODB_TABLE_PREFIX}-simulation-history`;
-const dynamoDbClient = new DynamoDBClient({
-  region: process.env.AWS_REGION?.trim() || "us-east-1",
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!
-  }
-});
-const dynamoDocClient = DynamoDBDocumentClient.from(dynamoDbClient, {
-  marshallOptions: {
-    removeUndefinedValues: true
-  }
-});
+const SIMULATION_CACHE_SCHEMA_VERSION = `canvas-json-v4::v${CACHE_VERSION}`;
+// Persistent (SQLite) cache survives restarts and scale-to-zero; the in-memory layer is a hot copy.
+const SIMULATION_PERSISTED_TTL_MS = 1000 * 60 * 60 * Number(process.env.SIMULATION_CACHE_TTL_HOURS ?? 168);
 const simulationResponseCache = new Map<
   string,
   {
@@ -102,144 +117,6 @@ const simulationResponseCache = new Map<
     };
   }
 >();
-
-function normalizeTopicCacheSlug(topicKey: string): string {
-  const slug = topicKey
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  return slug || "untitled-topic";
-}
-
-function getSimulationS3CacheKey(topicKey: string): string {
-  return `simulations/v${CACHE_VERSION}/${normalizeTopicCacheSlug(topicKey)}.json`;
-}
-
-async function clearS3CacheBucket(): Promise<void> {
-  let continuationToken: string | undefined;
-  do {
-    const listed = await s3Client.send(
-      new ListObjectsV2Command({
-        Bucket: S3_BUCKET,
-        ContinuationToken: continuationToken
-      })
-    );
-    const keys =
-      listed.Contents?.map((item) => item.Key)
-        .filter((item): item is string => Boolean(item))
-        .map((key) => ({ Key: key })) ?? [];
-    if (keys.length > 0) {
-      await s3Client.send(
-        new DeleteObjectsCommand({
-          Bucket: S3_BUCKET,
-          Delete: {
-            Objects: keys,
-            Quiet: true
-          }
-        })
-      );
-      console.log(`[Cache] Deleted ${keys.length} S3 objects from ${S3_BUCKET}.`);
-    }
-    continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
-  } while (continuationToken);
-}
-
-async function initializeCacheState(): Promise<void> {
-  simulationResponseCache.clear();
-  console.log(`[Cache] Cleared in-memory simulation cache. CACHE_VERSION=${CACHE_VERSION}`);
-  try {
-    await clearS3CacheBucket();
-    console.log(`[Cache] Cleared S3 cache bucket ${S3_BUCKET}. CACHE_VERSION=${CACHE_VERSION}`);
-  } catch (error) {
-    console.error(`[Cache] Failed to clear S3 cache bucket ${S3_BUCKET}. Continuing startup.`, error);
-  }
-}
-
-async function initializeDynamoDBTables(): Promise<void> {
-  try {
-    console.log("[DynamoDB] Initializing tables...");
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
-      throw new Error("DynamoDB is not configured. Missing AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY.");
-    }
-
-    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-    const ensureTable = async (
-      tableName: string,
-      keySchema: Array<{ AttributeName: string; KeyType: "HASH" | "RANGE" }>,
-      attributeDefinitions: Array<{ AttributeName: string; AttributeType: "S" | "N" | "B" }>
-    ) => {
-      let created = false;
-      try {
-        await dynamoDbClient.send(new DescribeTableCommand({ TableName: tableName }));
-      } catch (error) {
-        const name = (error as { name?: string }).name ?? "";
-        if (name !== "ResourceNotFoundException") {
-          throw error;
-        }
-        created = true;
-      }
-
-      if (created) {
-        await dynamoDbClient.send(
-          new CreateTableCommand({
-            TableName: tableName,
-            BillingMode: "PAY_PER_REQUEST",
-            KeySchema: keySchema,
-            AttributeDefinitions: attributeDefinitions
-          })
-        );
-
-        for (let attempt = 0; attempt < 20; attempt += 1) {
-          await sleep(1500);
-          try {
-            const description = await dynamoDbClient.send(
-              new DescribeTableCommand({ TableName: tableName })
-            );
-            if (description.Table?.TableStatus === "ACTIVE") {
-              console.log(`[DynamoDB] Table ${tableName} ready`);
-              return;
-            }
-          } catch (_error) {
-            // keep polling
-          }
-        }
-        throw new Error(`Timed out waiting for DynamoDB table ${tableName} to become ACTIVE.`);
-      }
-
-      console.log(`[DynamoDB] Table ${tableName} ready`);
-    };
-
-    await ensureTable(
-      DYNAMODB_USERS_TABLE,
-      [{ AttributeName: "userId", KeyType: "HASH" }],
-      [{ AttributeName: "userId", AttributeType: "S" }]
-    );
-    await ensureTable(
-      DYNAMODB_SESSIONS_TABLE,
-      [{ AttributeName: "sessionToken", KeyType: "HASH" }],
-      [{ AttributeName: "sessionToken", AttributeType: "S" }]
-    );
-    await ensureTable(
-      DYNAMODB_SIM_HISTORY_TABLE,
-      [
-        { AttributeName: "userId", KeyType: "HASH" },
-        { AttributeName: "timestamp", KeyType: "RANGE" }
-      ],
-      [
-        { AttributeName: "userId", AttributeType: "S" },
-        { AttributeName: "timestamp", AttributeType: "S" }
-      ]
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`[DynamoDB] ERROR: ${message}`);
-    throw error;
-  }
-}
 
 app.use(
   cors({
@@ -267,46 +144,9 @@ function asyncHandler(
 }
 
 async function appendHistorySafely(interaction: InteractionRecord): Promise<void> {
-  try {
-    await updateStore((store) => {
-      store.history.push(interaction);
-    });
-  } catch (error) {
-    const code = (error as { code?: string }).code;
-    const message = error instanceof Error ? error.message : "";
-    const isMissingUserFk =
-      code === "23503" ||
-      message.includes("history_user_id_fkey") ||
-      message.includes("violates foreign key constraint");
-    if (isMissingUserFk) {
-      console.warn("[History] Skipping write because user no longer exists in database.");
-      return;
-    }
-    throw error;
+  if (!addHistory(interaction)) {
+    console.warn("[History] Skipping write because user no longer exists in database.");
   }
-}
-
-type LlmJsonRequestOptions = {
-  maxTokens?: number;
-  temperature?: number;
-};
-
-async function saveSimulationS3Cache(topicKey: string, payload: unknown): Promise<void> {
-  const cacheKey = getSimulationS3CacheKey(topicKey);
-  await s3Client.send(
-    new PutObjectCommand({
-      Bucket: S3_BUCKET,
-      Key: cacheKey,
-      Body: JSON.stringify(payload),
-      ContentType: "application/json"
-    })
-  );
-  console.log(`Cached simulation for topic: ${topicKey}`);
-}
-
-async function requestLlmJson(prompt: string, options: LlmJsonRequestOptions = {}) {
-  const { maxTokens = 8000, temperature = 0 } = options;
-  return generateJson(prompt, { maxTokens, temperature });
 }
 
 const registerSchema = z.object({
@@ -1679,9 +1519,11 @@ function repairMatrixGridSteps(steps: GeminiCanvasStep[]): GeminiCanvasStep[] {
   });
 }
 
-function applyTopicRepairs(steps: GeminiCanvasStep[]): GeminiCanvasStep[] {
+function applyTopicRepairs(topic: string, steps: GeminiCanvasStep[]): GeminiCanvasStep[] {
   const axisPlotRepairedSteps = repairAxisPlotSteps(steps);
-  return repairMatrixGridSteps(axisPlotRepairedSteps);
+  // The 2x2 TP/FP/FN/TN layout is only valid for a confusion matrix. Applying it to any other topic
+  // snaps every row of boxes into a 2x2 grid and stacks the fifth box on the first.
+  return /confusion\s+matrix/i.test(topic) ? repairMatrixGridSteps(axisPlotRepairedSteps) : axisPlotRepairedSteps;
 }
 
 const SUBTITLE_ALIGNMENT_STOP_WORDS = new Set([
@@ -1915,10 +1757,28 @@ function enforceSubtitleVisualAlignment(step: GeminiCanvasStep): GeminiCanvasSte
   };
 }
 
+// Connectors and decorative shapes are expected to be unlabeled.
+function isDecorativeElementType(type: string): boolean {
+  return (
+    type === "arrow" ||
+    type === "line" ||
+    type === "dashed_line" ||
+    type === "curved_arrow" ||
+    type === "highlight_box" ||
+    type === "grid" ||
+    type === "polygon" ||
+    type === "path" ||
+    type === "wave"
+  );
+}
+
 function countStepPlaceholderLabels(step: GeminiCanvasStep): number {
   const placeholderLabelPattern =
     /^(text|rectangle|circle|ellipse|triangle|bar|matrix|axis|plot[_ ]?point|arrow|line|element|tree[_ ]?node)\s*\d*$/i;
   return (step.canvas_instructions?.elements ?? []).reduce((count, element) => {
+    if (isDecorativeElementType(normalizeElementType((element as Record<string, unknown>).type))) {
+      return count;
+    }
     const label = asText((element as Record<string, unknown>).label);
     if (!label || placeholderLabelPattern.test(label)) {
       return count + 1;
@@ -1945,7 +1805,7 @@ function scoreStepQuality(step: GeminiCanvasStep): number {
   score -= Math.min(25, placeholderCount * 6);
   const lowSignalLabels = elements.reduce((count, element) => {
     const type = normalizeElementType((element as Record<string, unknown>).type);
-    if (isConnectorElementType(type)) {
+    if (isDecorativeElementType(type)) {
       return count;
     }
     const label = asText((element as Record<string, unknown>).label).trim();
@@ -2133,7 +1993,8 @@ function ensureRenderableElementsForStep(topic: string, step: GeminiCanvasStep):
       if (isConnectorElementType(type)) {
         next.label = "";
       } else {
-        next.label = compressElementLabel(rawLabel, `${type.replace(/_/g, " ")} ${index + 1}`);
+        // An unlabeled shape stays unlabeled; inventing "circle 7" captions only adds noise.
+        next.label = rawLabel.trim() ? compressElementLabel(rawLabel, "Concept") : "";
       }
 
       if (type === "plot_point") {
@@ -2178,205 +2039,128 @@ function shouldRegenerateStep(step: GeminiCanvasStep, score: number, alignmentSc
     .split(/\s+/)
     .filter((word) => word.length > 0).length;
   const subtitleNumbers = extractSubtitleNumbers(asText(step.subtitle));
-  const lowSignalLabels = (step.canvas_instructions?.elements ?? []).reduce((count, element) => {
+  const unlabeledShapes = elements.reduce((count, element) => {
     const type = normalizeElementType((element as Record<string, unknown>).type);
-    if (isConnectorElementType(type)) {
+    if (isDecorativeElementType(type)) {
       return count;
     }
-    const label = asText((element as Record<string, unknown>).label).trim();
-    if (!label) {
-      return count + 1;
-    }
-    if (/^-?\d+(?:\.\d+)?$/.test(label)) {
-      return count;
-    }
-    return label.split(/\s+/).filter(Boolean).length <= 1 ? count + 1 : count;
+    return asText((element as Record<string, unknown>).label).trim() ? count : count + 1;
   }, 0);
   const lowNumericCoverage = subtitleNumbers.length > 0 && alignmentScore < 70;
+  // Thresholds flag real defects only. A healthy step scores about 50-70 on scoreStepQuality, so the
+  // score is a severe-floor check here and is otherwise used to compare a draft with its repair.
   return (
-    score < 68 ||
-    alignmentScore < 82 ||
+    score < 40 ||
+    alignmentScore < 75 ||
     elements.length < 5 ||
-    subtitleWords < 24 ||
+    subtitleWords < 18 ||
     lowNumericCoverage ||
-    lowSignalLabels > 1 ||
+    unlabeledShapes > 1 ||
     countStepPlaceholderLabels(step) > 0
   );
 }
 
-async function regenerateLowQualitySteps(topic: string, steps: GeminiCanvasStep[]): Promise<GeminiCanvasStep[]> {
-  const scored = steps.map((step, index) => ({
-    index,
-    step,
-    score: scoreStepQuality(step),
-    alignmentScore: scoreSubtitleVisualAlignment(step)
-  }));
-  const targets = scored
+// Bounds repair latency and cost: only the weakest steps get a second pass.
+const MAX_STEP_REPAIRS = 3;
+
+function computeStepDurationMs(subtitle: string): number {
+  const words = subtitle.split(/\s+/).filter(Boolean).length;
+  return Math.min(35000, Math.max(12000, words * 400));
+}
+
+function parseGeneratedStep(
+  rawStep: { step: number; concept: string; subtitle: string; elements: unknown },
+  index: number
+): GeminiCanvasStep | null {
+  const normalized = normalizeCanvasStep(
+    {
+      step: rawStep.step,
+      concept: rawStep.concept,
+      subtitle: rawStep.subtitle,
+      duration_ms: computeStepDurationMs(rawStep.subtitle),
+      canvas_instructions: { elements: Array.isArray(rawStep.elements) ? rawStep.elements : [] }
+    },
+    index
+  );
+  const parsed = simCanvasStepSchema.safeParse(normalized);
+  return parsed.success ? parsed.data : null;
+}
+
+// Low-quality steps are repaired concurrently: each repair is independent, so wall time is the
+// slowest single repair instead of the sum of all of them.
+async function regenerateLowQualitySteps(
+  topic: string,
+  level: DifficultyLevel,
+  steps: GeminiCanvasStep[],
+  plans: Map<number, string>
+): Promise<GeminiCanvasStep[]> {
+  const targets = steps
+    .map((step, index) => ({
+      index,
+      step,
+      score: scoreStepQuality(step),
+      alignmentScore: scoreSubtitleVisualAlignment(step)
+    }))
     .filter((item) => shouldRegenerateStep(item.step, item.score, item.alignmentScore))
-    .sort((a, b) => (a.alignmentScore + a.score) - (b.alignmentScore + b.score));
+    .sort((a, b) => a.alignmentScore + a.score - (b.alignmentScore + b.score))
+    .slice(0, MAX_STEP_REPAIRS);
 
   if (targets.length === 0) {
     return steps;
   }
+  console.log(
+    `[Simulation] Repairing ${targets.length}/${steps.length} steps: ` +
+      targets
+        .map((item) => {
+          const elements = item.step.canvas_instructions?.elements ?? [];
+          const words = asText(item.step.subtitle).split(/\s+/).filter(Boolean).length;
+          return `#${item.step.step}(q${item.score}/a${item.alignmentScore}/e${elements.length}/w${words}/p${countStepPlaceholderLabels(item.step)})`;
+        })
+        .join(" ")
+  );
 
   const nextSteps = [...steps];
-  for (const target of targets) {
-    const current = nextSteps[target.index];
-    const improvePrompt = `
-You are improving one low-quality simulation step.
-Topic: ${topic}
-Current step number: ${current.step}
-Current concept: ${current.concept}
-Current subtitle: ${current.subtitle}
-
-Requirements:
-- Return exactly one improved step in JSON.
-- Keep the same step number and concept.
-- Subtitle must be 3-4 complete beginner-friendly sentences.
-- Include duration_ms using word_count * 400 (min 12000, max 35000).
-- Include 6-10 elements.
-- Every non-connector element must have a meaningful label.
-- No placeholder labels like "text 1", "circle 2", "tree_node 1".
-- Use only: tree_node, bar, text, arrow, line, rectangle, circle, matrix, axis, plot_point, flowchart_diamond.
-- Build visuals from the subtitle sentence-by-sentence. Every key noun/value in subtitle must appear as a labeled element.
-- Non-text labels must be concise (max 4 words). Avoid sentence fragments in shape labels.
-- If subtitle includes numeric values, those same numeric values must appear in element labels/values.
-- If subtitle says compare/swap two values, highlight those exact values with contrasting colors and motion.
-- Prefer structured figures over text-only layouts:
-  sorting/comparison => bars
-  tree/hierarchy => tree_node
-  probabilities/functions => axis+plot_point or pipeline with bars
-  matrix/grid => matrix or aligned rectangles
-- Ensure visuals match subtitle exactly.
-
-Current draft step JSON:
-${JSON.stringify(current)}
-`.trim();
-
-    try {
-      const payload = await requestLlmJson(improvePrompt, {
-        maxTokens: 2400,
-        temperature: 0.1
-      });
-      const payloadObject = asObject(payload);
-      const payloadSteps = payloadObject && Array.isArray(payloadObject.steps) ? payloadObject.steps : null;
-      const rawStep = (payloadObject?.step ?? (payloadSteps ? payloadSteps[0] : undefined) ?? payload) as unknown;
-      const parsed = simCanvasStepSchema.safeParse(normalizeCanvasStep(rawStep, target.index));
-      if (!parsed.success) {
-        continue;
+  await Promise.all(
+    targets.map(async (target) => {
+      const current = steps[target.index];
+      try {
+        const payload = asObject(
+          await generateJson(
+            buildImproveStepPrompt({
+              topic,
+              level,
+              step: { step: current.step, concept: current.concept, subtitle: current.subtitle },
+              visualPlan: plans.get(current.step) ?? "",
+              currentElements: current.canvas_instructions?.elements ?? []
+            }),
+            { system: ELEMENT_SYSTEM_PROMPT, maxTokens: 1800, temperature: 0.1, tag: `improve-${current.step}` }
+          )
+        );
+        const rewrittenSubtitle = asText(payload?.subtitle).trim();
+        const subtitle =
+          rewrittenSubtitle.length >= 60 && rewrittenSubtitle.length <= 1200 ? rewrittenSubtitle : current.subtitle;
+        const improved = parseGeneratedStep(
+          { step: current.step, concept: current.concept, subtitle, elements: payload?.elements },
+          target.index
+        );
+        if (improved && scoreStepQuality(improved) > target.score) {
+          nextSteps[target.index] = improved;
+        }
+      } catch (_error) {
+        // Keep the original step if targeted regeneration fails.
       }
-      const improved = parsed.data;
-      const improvedScore = scoreStepQuality(improved);
-      if (improvedScore > target.score) {
-        nextSteps[target.index] = improved;
-      }
-    } catch (_error) {
-      // Keep original step if targeted regeneration fails.
-    }
-  }
+    })
+  );
 
   return nextSteps;
-}
-
-async function alignSimulationStepsToSubtitles(
-  topic: string,
-  steps: GeminiCanvasStep[]
-): Promise<GeminiCanvasStep[]> {
-  if (steps.length === 0) {
-    return steps;
-  }
-
-  const outline = steps.map((step) => ({
-    step: step.step,
-    concept: step.concept,
-    subtitle: step.subtitle,
-    duration_ms: step.duration_ms ?? 16000
-  }));
-
-  const prompt = `
-You are a subtitle-grounded simulation visualizer.
-Topic: ${topic}
-
-Given this exact step outline:
-${JSON.stringify(outline)}
-
-Return ONLY valid JSON:
-{
-  "steps": [
-    {
-      "step": 1,
-      "concept": "must match outline exactly",
-      "subtitle": "must match outline exactly",
-      "duration_ms": 16000,
-      "canvas_instructions": {
-        "elements": []
-      }
-    }
-  ]
-}
-
-Hard requirements:
-- Keep step count exactly ${steps.length}.
-- Keep each step number, concept, subtitle, and duration_ms exactly as provided.
-- Generate ONLY canvas_instructions.elements for each step.
-- Each step must have 6-10 elements, with at least 3 non-text visual elements.
-- Visuals must be directly derived from that step subtitle, not from generic templates.
-- Every numeric value mentioned in subtitle must appear in element labels/values.
-- If subtitle describes compare/swap/insert/highlight, show that exact action visually.
-- Use only: tree_node, bar, text, arrow, line, rectangle, circle, matrix, axis, plot_point, flowchart_diamond.
-- No placeholder labels like "text 1", "rectangle 2", "node 1".
-- Non-text labels must be concise (max 4 words). Do not place full sentences inside rectangle/circle/bar labels.
-- Topic-specific structure rules:
-  * softmax/sigmoid/relu/activation/probability => show logits -> transform -> normalized output with bars and arrows.
-  * regression/function/curve => axis + plot_point + fitted line.
-  * tree/BST/hierarchy => tree_node layout.
-  * sorting/array/comparison => bars with numeric labels and compare/swap highlight.
-  * confusion matrix => 2x2 labeled grid (TP, FP, FN, TN).
-- Output only JSON and nothing else.
-`.trim();
-
-  try {
-    const payload = await requestLlmJson(prompt, {
-      maxTokens: 8000,
-      temperature: 0
-    });
-    const candidates = extractStepCandidates(payload);
-    if (!candidates.length) {
-      return steps;
-    }
-
-    const alignedSteps = steps.map((original, index) => {
-      const parsed = simCanvasStepSchema.safeParse(normalizeCanvasStep(candidates[index], index));
-      if (!parsed.success) {
-        return original;
-      }
-      const generated = parsed.data;
-      const generatedElements = generated.canvas_instructions?.elements ?? [];
-      const nonTextVisuals = generatedElements.filter((element) => {
-        const type = normalizeElementType((element as Record<string, unknown>).type);
-        return type !== "text" && !isConnectorElementType(type);
-      }).length;
-      if (generatedElements.length < 6 || nonTextVisuals < 3) {
-        return original;
-      }
-      return {
-        ...original,
-        canvas_instructions: {
-          elements: generatedElements
-        }
-      };
-    });
-
-    return alignedSteps;
-  } catch (_error) {
-    return steps;
-  }
 }
 
 function enforceMeaningfulElementLabels(topic: string, steps: GeminiCanvasStep[]): GeminiCanvasStep[] {
   const placeholderLabelPattern =
     /^(text|rectangle|circle|ellipse|triangle|bar|matrix|axis|plot[_ ]?point|arrow|line|element|tree[_ ]?node)\s*\d*$/i;
   const skipPlaceholderLabelTypes = new Set(["arrow", "line", "dashed_line", "curved_arrow"]);
+  // Decorative shapes are meant to be unlabeled; do not invent captions for them.
+  const unlabeledOkTypes = new Set(["highlight_box", "grid", "polygon", "path", "wave"]);
   const isConfusionMatrixTopic = /confusion matrix/i.test(topic);
   const confusionLabels = ["True Positive", "False Positive", "False Negative", "True Negative"];
   const topicWords = topic
@@ -2395,6 +2179,9 @@ function enforceMeaningfulElementLabels(topic: string, steps: GeminiCanvasStep[]
       const type = asText(nextElement.type).toLowerCase().replace(/\s+/g, "_");
       const isPlaceholder = !rawLabel || placeholderLabelPattern.test(rawLabel);
       if (!isPlaceholder) {
+        return [nextElement as GeminiCanvasElement];
+      }
+      if (unlabeledOkTypes.has(type)) {
         return [nextElement as GeminiCanvasElement];
       }
       if (skipPlaceholderLabelTypes.has(type)) {
@@ -3156,6 +2943,72 @@ function normalizeProblemSets(
   });
 }
 
+async function generateSimulationOutline(topic: string, level: DifficultyLevel): Promise<OutlineStep[]> {
+  const payload = asObject(
+    await generateJson(buildOutlinePrompt(topic, level, narrationDepth(level)), {
+      system: OUTLINE_SYSTEM_PROMPT,
+      jsonSchema: OUTLINE_SCHEMA,
+      maxTokens: 2000,
+      temperature: 0.2,
+      tag: "outline"
+    })
+  );
+  const rawSteps = payload && Array.isArray(payload.steps) ? payload.steps : [];
+  const outline: OutlineStep[] = [];
+  for (const raw of rawSteps) {
+    const item = asObject(raw);
+    const subtitle = asText(item?.subtitle).trim();
+    if (!item || subtitle.length < 20) {
+      continue;
+    }
+    outline.push({
+      step: outline.length + 1,
+      concept: (asText(item.concept).trim() || `Step ${outline.length + 1}`).slice(0, 120),
+      subtitle: subtitle.slice(0, 1200),
+      visual_plan: asText(item.visual_plan).trim().slice(0, 600)
+    });
+    if (outline.length === 8) {
+      break;
+    }
+  }
+  if (outline.length === 0) {
+    throw new Error("Simulation generation failed: the model did not return a usable outline.");
+  }
+  return outline;
+}
+
+async function generateStepCanvas(
+  topic: string,
+  level: DifficultyLevel,
+  outline: OutlineStep[],
+  target: OutlineStep
+): Promise<GeminiCanvasStep | null> {
+  const prompt = buildElementPrompt({ topic, level, outline, target });
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const root = asObject(
+        await generateJson(prompt, {
+          system: ELEMENT_SYSTEM_PROMPT,
+          maxTokens: 1800,
+          temperature: attempt === 1 ? 0.2 : 0.4,
+          tag: `step-${target.step}`
+        })
+      );
+      const elements = root?.elements ?? asObject(root?.canvas_instructions)?.elements;
+      const step = parseGeneratedStep(
+        { step: target.step, concept: target.concept, subtitle: target.subtitle, elements },
+        target.step - 1
+      );
+      if (step && Array.isArray(elements) && elements.length > 0) {
+        return step;
+      }
+    } catch (error) {
+      console.warn(`[Simulation] Step ${target.step} canvas attempt ${attempt} failed:`, (error as Error).message);
+    }
+  }
+  return null;
+}
+
 async function generateSimulationFromGemini(
   topic: string,
   level: DifficultyLevel
@@ -3166,85 +3019,26 @@ async function generateSimulationFromGemini(
     );
   }
 
-  void level;
-  const simulationFormatPrompt = `
-You are an expert technical educator and diagram designer.
-Topic: ${topic}
+  const startedAt = Date.now();
+  // Phase 1: one small structured call fixes the story, the running example and a visual plan per step.
+  const outline = await generateSimulationOutline(topic, level);
+  const plans = new Map(outline.map((item) => [item.step, item.visual_plan] as const));
 
-Return ONLY valid JSON in this shape:
-{
-  "steps": [
-    {
-      "step": 1,
-      "concept": "short concept name",
-      "subtitle": "3-4 beginner-friendly factual sentences",
-      "duration_ms": 16000,
-      "canvas_instructions": {
-        "elements": [ ... ]
-      }
-    }
-  ]
-}
-
-Required per step:
-- step (integer)
-- concept (string)
-- subtitle (3-4 complete sentences)
-- duration_ms = min(35000, max(12000, word_count(subtitle) * 400))
-- canvas_instructions.elements (array)
-
-Global quality rules:
-- Generate 6-8 steps unless the topic is extremely simple; never fewer than 5.
-- Every step must contain 6-10 elements.
-- Every non-connector element must have a meaningful label from the topic (real term, value, or symbol).
-- Never use placeholder labels such as "text 1", "rectangle 2", "circle 3", "element 1", "tree_node 1", "bar 2".
-- Non-text labels must be concise (max 4 words). Never place full sentence fragments inside rectangle/circle/bar labels.
-- Layout must be clean and readable; no random filler.
-- Use ONLY these element types: tree_node, bar, text, arrow, line, rectangle, circle, matrix, axis, plot_point, flowchart_diamond.
-- Do not output markdown or prose outside JSON.
-
-Visual strategy rules (topic-agnostic):
-- First infer the concept family for the topic (data structure, algorithm, system design, networking, ML, math/stats, hardware, security, cloud, etc.).
-- Choose element types that semantically match each concept; avoid generic diagrams when a specific visual grammar exists.
-- For ordered values or comparisons, prefer bars/points/axes with numeric labels.
-- For hierarchy, prefer explicit parent-child nodes (tree_node or connected circles with arrows).
-- For pipelines or state transitions, prefer labeled nodes with directional arrows.
-- For matrix/grid concepts, use matrix or aligned rectangle grids with cell labels.
-- For formulas, include readable text labels and at least one visual that demonstrates the formula behavior with concrete values.
-- Keep coordinates distributed across the canvas; avoid stacking all elements in one corner.
-- Activation/probability topics (softmax/sigmoid/relu/probability/logits): show pipeline logits -> transform -> normalize with bars/arrows.
-- Regression/function topics: use axis + plot_point + line.
-- Sorting topics: use bars with numeric labels and swap/comparison highlights.
-- Tree topics: use tree_node hierarchy with numeric node values.
-- Confusion matrix topics: use a 2x2 labeled grid (TP/FP/FN/TN).
-
-Fidelity rules:
-- Visuals must exactly match each subtitle.
-- If subtitle mentions a specific value/node being highlighted or compared, highlight that exact element in orange (#FF6B35).
-- If subtitle mentions comparison between two values, visually mark both values with contrasting highlight colors.
-- Subtitle-first contract: design visuals directly from subtitle content, not from generic templates.
-- For every subtitle sentence, include at least one corresponding visual relation (position, color, connection, or animation) that proves the sentence on canvas.
-- If subtitle references direction (left/right/up/down), data flow, insertion, comparison, swap, transition, or hierarchy, the canvas must show that exact behavior.
-- Do not reuse the same layout across steps; each step layout must reflect that step subtitle specifically.
-- Do not dump the full subtitle as one giant text element; split information into diagram elements with short labels.
-- Every step must include at least 2 non-text visual elements that directly represent the subtitle concept.
-`.trim();
-
-  const payload = await requestLlmJson(simulationFormatPrompt, {
-    maxTokens: 8000,
-    temperature: 0
-  });
-
-  const strict = llmSimulationSchema.safeParse(payload);
-  const candidates = strict.success ? strict.data.steps : extractStepCandidates(payload);
-  const generatedSteps: GeminiCanvasStep[] = [];
-  for (let index = 0; index < candidates.length; index += 1) {
-    const parsed = simCanvasStepSchema.safeParse(normalizeCanvasStep(candidates[index], index));
-    if (parsed.success) {
-      generatedSteps.push(parsed.data);
-    }
-  }
-
+  // Phase 2: every step's canvas is generated concurrently. The outline carries the shared data, so
+  // steps stay consistent even though they are produced independently.
+  const drafted = await Promise.all(
+    outline.map(async (item) => {
+      const step = await generateStepCanvas(topic, level, outline, item);
+      return (
+        step ??
+        parseGeneratedStep(
+          { step: item.step, concept: item.concept, subtitle: item.subtitle, elements: [] },
+          item.step - 1
+        )
+      );
+    })
+  );
+  const generatedSteps = drafted.filter((step): step is GeminiCanvasStep => step !== null);
   if (generatedSteps.length === 0) {
     throw new Error("Simulation generation failed: the model did not return valid steps.");
   }
@@ -3256,23 +3050,20 @@ Fidelity rules:
   );
   const validatedSteps = hasTreeNodes ? validateAndRepairBstSteps(generatedSteps) : generatedSteps;
   const labeledSteps = enforceMeaningfulElementLabels(topic, validatedSteps);
-  const repairedSteps = applyTopicRepairs(labeledSteps);
-  const modelAlignedSteps = await alignSimulationStepsToSubtitles(topic, repairedSteps);
-  const postModelAlignedLabeledSteps = enforceMeaningfulElementLabels(topic, modelAlignedSteps);
-  const postModelAlignedRepairedSteps = applyTopicRepairs(postModelAlignedLabeledSteps);
-  const alignedSteps = postModelAlignedRepairedSteps.map((step) => enforceSubtitleVisualAlignment(step));
-  const qualityImprovedSteps = await regenerateLowQualitySteps(topic, alignedSteps);
+  const repairedSteps = applyTopicRepairs(topic, labeledSteps);
+  const alignedSteps = repairedSteps.map((step) => enforceSubtitleVisualAlignment(step));
+
+  // Phase 3: concurrent repair of the weak steps only.
+  const qualityImprovedSteps = await regenerateLowQualitySteps(topic, level, alignedSteps, plans);
   const finalLabeledSteps = enforceMeaningfulElementLabels(topic, qualityImprovedSteps);
-  const finalRepairedSteps = applyTopicRepairs(finalLabeledSteps);
+  const finalRepairedSteps = applyTopicRepairs(topic, finalLabeledSteps);
   const finalAlignedSteps = finalRepairedSteps.map((step) => enforceSubtitleVisualAlignment(step));
   const finalRenderableSteps = ensureRenderableElementsFromSubtitle(topic, finalAlignedSteps);
 
-  try {
-    await saveSimulationS3Cache(topic, { steps: finalRenderableSteps });
-  } catch (error) {
-    console.warn("[Simulation] Unable to cache generated steps to S3. Continuing without cache.", error);
-  }
-
+  console.log(
+    `[Simulation] "${topic}" (${level}) generated ${finalRenderableSteps.length} steps in ` +
+      `${((Date.now() - startedAt) / 1000).toFixed(1)}s`
+  );
   return { steps: finalRenderableSteps };
 }
 
@@ -3450,35 +3241,19 @@ function convertTemplateToCanvasSteps(topic: Topic): GeminiCanvasStep[] {
   });
 }
 
-async function generateChatReplyFromGemini(
+async function generateChatReply(
   topicTitle: string,
   message: string,
   mode: "voice" | "text",
   context: Array<{ role: "user" | "assistant"; text: string; timestamp?: string }>
 ): Promise<string | null> {
-  void GEMINI_API_KEY;
-  void GEMINI_MODEL;
-
-  const recentContext = context.slice(-5);
-  const contextText = recentContext
-    .map((entry) => `${entry.role === "assistant" ? "Tutor" : "User"}: ${entry.text.slice(0, 500)}`)
-    .join("\n");
-
-  const systemPrompt = `You are an expert tutor teaching the topic: ${topicTitle}. Answer the user's question clearly and concisely in 2-3 sentences. Stay focused on the topic.`;
-  const prompt = `
-${systemPrompt}
-User mode: ${mode}
-Conversation context (last 5 messages):
-${contextText || "No previous messages."}
-Current user question: "${message}"
-Return plain text only.
-`.trim();
-
-  const text = (await generateText(prompt, { maxTokens: 1200, temperature: 0.3 })).trim();
-  if (!text) {
-    return null;
-  }
-  return text.slice(0, 900);
+  const text = await generateText(buildChatPrompt(message, context), {
+    system: buildChatSystemPrompt(topicTitle, mode),
+    maxTokens: 400,
+    temperature: 0.3,
+    tag: "chat"
+  });
+  return text ? text.slice(0, 900) : null;
 }
 
 async function analyzeVoiceAction(
@@ -3493,33 +3268,29 @@ async function analyzeVoiceAction(
   feedback: string;
   requires_animation: boolean;
 }> {
-  const prompt = `
-You are an intelligent assistant controlling an interactive technical simulation. The user said: ${userSpeech}. The current topic is ${topicTitle}. The current simulation step is ${stepConcept}. The current step number is ${stepNumber}.
-Map natural language reliably using these examples:
-- next / forward / continue => next_step
-- back / previous / go back => previous_step
-- stop / pause / wait => pause
-- play / resume / start => play
-- what is this / explain / tell me => answer_question
-- move X to Y => move_element
-- go to step N / jump to step N / show step N / take me to step N => jump_to_step with step_number N
-Respond with ONLY valid JSON containing:
-- action_type (exactly one of: answer_question, move_element, modify_element, play, pause, next_step, previous_step, jump_to_step, restart, open_menu, close_menu, toggle_subtitles, toggle_voice, not_possible, general_answer)
-- action_params (object; for move_element include element_label, target_x, target_y as canvas percentages; for modify_element include element_label, property, new_value; for jump_to_step include step_number as integer)
-- spoken_response (brief natural response for the user)
-- feedback (required only for move_element and modify_element; otherwise empty string)
-- requires_animation (boolean)
-Output only valid JSON with no extra text.
-`.trim();
+  const parsed = (await generateJson(
+    buildVoiceActionPrompt({ topicTitle, userSpeech, stepConcept, stepNumber }),
+    {
+      system: VOICE_ACTION_SYSTEM_PROMPT,
+      jsonSchema: VOICE_ACTION_SCHEMA,
+      maxTokens: 300,
+      temperature: 0.1,
+      tag: "voice-action"
+    }
+  )) as Record<string, unknown>;
 
-  const parsed = (await generateJson(prompt, { maxTokens: 200, temperature: 0.1 })) as Record<string, unknown>;
+  // Structured Outputs requires every parameter key; drop the ones the model left null.
+  const rawParams =
+    parsed.action_params && typeof parsed.action_params === "object" && !Array.isArray(parsed.action_params)
+      ? (parsed.action_params as Record<string, unknown>)
+      : {};
+  const actionParams = Object.fromEntries(
+    Object.entries(rawParams).filter(([, value]) => value !== null && value !== undefined)
+  );
 
   return {
     action_type: typeof parsed.action_type === "string" ? parsed.action_type : "general_answer",
-    action_params:
-      parsed.action_params && typeof parsed.action_params === "object" && !Array.isArray(parsed.action_params)
-        ? (parsed.action_params as Record<string, unknown>)
-        : {},
+    action_params: actionParams,
     spoken_response:
       typeof parsed.spoken_response === "string" && parsed.spoken_response.trim().length > 0
         ? parsed.spoken_response.trim()
@@ -3547,72 +3318,8 @@ function getNextLevel(level: DifficultyLevel): DifficultyLevel | null {
   return LEVELS[index + 1];
 }
 
-type DynamoUserRecord = {
-  userId: string;
-  name: string;
-  email: string;
-  passwordHash: string;
-  createdAt: string;
-  preferences?: Record<string, unknown>;
-};
-
-async function findUserByEmail(email: string): Promise<DynamoUserRecord | null> {
-  const response = await dynamoDocClient.send(
-    new ScanCommand({
-      TableName: DYNAMODB_USERS_TABLE,
-      FilterExpression: "#email = :email",
-      ExpressionAttributeNames: {
-        "#email": "email"
-      },
-      ExpressionAttributeValues: {
-        ":email": email
-      }
-    })
-  );
-  const item = response.Items?.[0] as Record<string, unknown> | undefined;
-  if (!item) {
-    return null;
-  }
-  return {
-    userId: String(item.userId ?? ""),
-    name: String(item.name ?? ""),
-    email: String(item.email ?? ""),
-    passwordHash: String(item.passwordHash ?? ""),
-    createdAt: String(item.createdAt ?? ""),
-    preferences:
-      item.preferences && typeof item.preferences === "object" && !Array.isArray(item.preferences)
-        ? (item.preferences as Record<string, unknown>)
-        : {}
-  };
-}
-
-async function saveUserRecord(user: DynamoUserRecord): Promise<void> {
-  await dynamoDocClient.send(
-    new PutCommand({
-      TableName: DYNAMODB_USERS_TABLE,
-      Item: user
-    })
-  );
-}
-
-async function saveSessionRecord(sessionToken: string, userId: string): Promise<void> {
-  const createdAt = new Date();
-  const expiresAt = new Date(createdAt.getTime() + 24 * 60 * 60 * 1000);
-  await dynamoDocClient.send(
-    new PutCommand({
-      TableName: DYNAMODB_SESSIONS_TABLE,
-      Item: {
-        sessionToken,
-        userId,
-        createdAt: createdAt.toISOString(),
-        expiresAt: expiresAt.toISOString()
-      }
-    })
-  );
-}
-
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "interactive-tech-tutor-api" });
+  res.json({ ok: true, service: "interactive-tech-tutor-api", commit: process.env.DEPLOYED_COMMIT ?? "dev" });
 });
 
 app.post(
@@ -3633,36 +3340,29 @@ app.post(
   }
   const normalizedName = (name?.trim() || normalizedEmail.split("@")[0] || "Learner").slice(0, 80);
   const now = new Date().toISOString();
-  const existing = await findUserByEmail(normalizedEmail);
-  if (existing) {
+  if (findUserByEmail(normalizedEmail)) {
     res.status(409).json({ error: "User already exists." });
     return;
   }
 
   const userId = randomUUID();
-  await saveUserRecord({
-    userId,
+  const created = createUser({
+    id: userId,
     name: normalizedName,
     email: normalizedEmail,
-    passwordHash: hashPassword(normalizedPassword),
+    passwordHash: await hashPassword(normalizedPassword),
     createdAt: now,
-    preferences: {}
+    lastLoginAt: now
   });
+  if (!created) {
+    res.status(409).json({ error: "User already exists." });
+    return;
+  }
 
-  await updateStore((store) => {
-    const hasPreferences = store.preferences.some((item) => item.userId === userId);
-    if (!hasPreferences) {
-      const preferences: UserPreferences = {
-        userId,
-        interactionMode: "both",
-        voiceSettings: defaultVoiceSettings()
-      };
-      store.preferences.push(preferences);
-    }
-  });
+  ensurePreferences({ userId, interactionMode: "both", voiceSettings: defaultVoiceSettings() });
 
   const token = createToken({ userId, email: normalizedEmail });
-  await saveSessionRecord(token, userId);
+  saveSession(token, userId);
   res.status(201).json({
     token,
     user: { id: userId, name: normalizedName, email: normalizedEmail, lastLoginAt: now }
@@ -3686,30 +3386,20 @@ app.post(
     res.status(400).json({ error: "Invalid email or password." });
     return;
   }
-  const passwordHash = hashPassword(normalizedPassword);
   const now = new Date().toISOString();
 
-  const user = await findUserByEmail(normalizedEmail);
-  if (!user || user.passwordHash !== passwordHash) {
+  const user = findUserByEmail(normalizedEmail);
+  if (!user || !(await verifyPassword(normalizedPassword, user.passwordHash))) {
     res.status(401).json({ error: "Invalid email or password." });
     return;
   }
 
-  await updateStore((store) => {
-    const hasPreferences = store.preferences.some((item) => item.userId === user.userId);
-    if (!hasPreferences) {
-      const preferences: UserPreferences = {
-        userId: user.userId,
-        interactionMode: "both",
-        voiceSettings: defaultVoiceSettings()
-      };
-      store.preferences.push(preferences);
-    }
-  });
+  touchLastLogin(user.id, now);
+  ensurePreferences({ userId: user.id, interactionMode: "both", voiceSettings: defaultVoiceSettings() });
 
-  const token = createToken({ userId: user.userId, email: user.email });
-  await saveSessionRecord(token, user.userId);
-  res.json({ token, user: { id: user.userId, name: user.name, email: user.email, lastLoginAt: now } });
+  const token = createToken({ userId: user.id, email: user.email });
+  saveSession(token, user.id);
+  res.json({ token, user: { id: user.id, name: user.name, email: user.email, lastLoginAt: now } });
   })
 );
 
@@ -3731,10 +3421,7 @@ app.get(
   "/api/progress",
   authMiddleware,
   asyncHandler(async (req: AuthenticatedRequest, res) => {
-  const userId = req.auth!.userId;
-  const store = await readStore();
-  const progress = store.progress.filter((record) => record.userId === userId);
-  res.json({ progress });
+  res.json({ progress: listProgress(req.auth!.userId) });
   })
 );
 
@@ -3752,31 +3439,17 @@ app.post(
   const payload = parsed.data;
   const now = new Date().toISOString();
 
-  const result = await updateStore((store) => {
-    const existing = store.progress.find(
-      (record) =>
-        record.userId === userId && record.topicId === payload.topicId && record.level === payload.level
-    );
-
-    let updatedRecord: ProgressRecord;
-    if (existing) {
-      existing.status = payload.status;
-      existing.score = payload.score;
-      existing.timeSpent = payload.timeSpent;
-      existing.updatedAt = now;
-      updatedRecord = existing;
-    } else {
-      updatedRecord = {
-        userId,
-        topicId: payload.topicId,
-        level: payload.level,
-        status: payload.status,
-        score: payload.score,
-        timeSpent: payload.timeSpent,
-        updatedAt: now
-      };
-      store.progress.push(updatedRecord);
-    }
+  const result = inTransaction(() => {
+    const updatedRecord: ProgressRecord = {
+      userId,
+      topicId: payload.topicId,
+      level: payload.level,
+      status: payload.status,
+      score: payload.score,
+      timeSpent: payload.timeSpent,
+      updatedAt: now
+    };
+    upsertProgress(updatedRecord);
 
     const matchingProblemSet = PROBLEM_SETS.find(
       (problemSet) => problemSet.topicId === payload.topicId && problemSet.level === payload.level
@@ -3786,20 +3459,15 @@ app.post(
       payload.status === "completed" && payload.score >= passingScore ? getNextLevel(payload.level) : null;
 
     if (unlockedLevel) {
-      const nextExists = store.progress.some(
-        (record) => record.userId === userId && record.topicId === payload.topicId && record.level === unlockedLevel
-      );
-      if (!nextExists) {
-        store.progress.push({
-          userId,
-          topicId: payload.topicId,
-          level: unlockedLevel,
-          status: "not-started",
-          score: 0,
-          timeSpent: 0,
-          updatedAt: now
-        });
-      }
+      insertProgressIfMissing({
+        userId,
+        topicId: payload.topicId,
+        level: unlockedLevel,
+        status: "not-started",
+        score: 0,
+        timeSpent: 0,
+        updatedAt: now
+      });
     }
 
     return { progress: updatedRecord, unlockedLevel };
@@ -3813,9 +3481,7 @@ app.get(
   "/api/preferences",
   authMiddleware,
   asyncHandler(async (req: AuthenticatedRequest, res) => {
-  const userId = req.auth!.userId;
-  const store = await readStore();
-  const preferences = store.preferences.find((item) => item.userId === userId);
+  const preferences = getPreferences(req.auth!.userId);
   if (!preferences) {
     res.status(404).json({ error: "Preferences not found." });
     return;
@@ -3834,26 +3500,14 @@ app.put(
     return;
   }
 
-  const userId = req.auth!.userId;
-  const body = parsed.data;
+  const preferences: UserPreferences = {
+    userId: req.auth!.userId,
+    interactionMode: parsed.data.interactionMode,
+    voiceSettings: parsed.data.voiceSettings
+  };
+  upsertPreferences(preferences);
 
-  const updated = await updateStore((store) => {
-    const current = store.preferences.find((item) => item.userId === userId);
-    if (!current) {
-      const created: UserPreferences = {
-        userId,
-        interactionMode: body.interactionMode,
-        voiceSettings: body.voiceSettings
-      };
-      store.preferences.push(created);
-      return created;
-    }
-    current.interactionMode = body.interactionMode;
-    current.voiceSettings = body.voiceSettings;
-    return current;
-  });
-
-  res.json({ preferences: updated });
+  res.json({ preferences });
   })
 );
 
@@ -3861,14 +3515,8 @@ app.get(
   "/api/history",
   authMiddleware,
   asyncHandler(async (req: AuthenticatedRequest, res) => {
-  const userId = req.auth!.userId;
   const topicId = typeof req.query.topicId === "string" ? req.query.topicId : undefined;
-  const store = await readStore();
-  const history = store.history
-    .filter((item) => item.userId === userId && (!topicId || item.topicId === topicId))
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-  res.json({ history });
+  res.json({ history: listHistory(req.auth!.userId, topicId) });
   })
 );
 
@@ -3876,15 +3524,8 @@ app.delete(
   "/api/history/topic/:topicId",
   authMiddleware,
   asyncHandler(async (req: AuthenticatedRequest, res) => {
-  const userId = req.auth!.userId;
   const topicId = req.params.topicId;
-
-  const removedCount = await updateStore((store) => {
-    const before = store.history.length;
-    store.history = store.history.filter((item) => !(item.userId === userId && item.topicId === topicId));
-    return before - store.history.length;
-  });
-
+  const removedCount = deleteHistoryByTopic(req.auth!.userId, topicId);
   res.json({ removedCount, topicId });
   })
 );
@@ -3918,6 +3559,64 @@ app.post(
   })
 );
 
+type SimulationResponsePayload = {
+  topic: Topic;
+  problemSets: ProblemSet[];
+  openingMessage: string;
+  generationSource: "template" | "ai";
+  explanation_script: string;
+  simulation_steps: unknown[];
+};
+
+// Concurrent requests for the same topic share one generation instead of paying for it twice.
+const inflightSimulations = new Map<string, Promise<SimulationResponsePayload>>();
+
+async function buildSimulationResponse(
+  requestedTopic: string,
+  level: DifficultyLevel
+): Promise<SimulationResponsePayload> {
+  const topic = buildGeneratedTopic(requestedTopic, level);
+  let simulationSteps: GeminiCanvasStep[] = [];
+  let openingMessage = `Generated a live simulation plan for ${topic.title}.`;
+  let generationSource: "template" | "ai" = "ai";
+  let generationError = "";
+  try {
+    const generated = await generateSimulationFromGemini(requestedTopic, level);
+    simulationSteps = generated.steps;
+  } catch (error) {
+    generationError = (error as Error).message;
+    console.error("[Simulation] AI generation failed, falling back to template:", generationError);
+  }
+  if (simulationSteps.length === 0) {
+    generationSource = "template";
+    simulationSteps = convertTemplateToCanvasSteps(topic);
+    openingMessage = generationError
+      ? `Generated with template fallback because the AI model failed: ${generationError.slice(0, 120)}`
+      : `Generated with template fallback for ${topic.title}.`;
+  }
+  const narration = normalizeNarration(simulationSteps.map((step) => step.subtitle));
+  if (narration.length > 0) {
+    topic.narration = narration;
+  }
+  if (simulationSteps[0]?.subtitle) {
+    openingMessage = simulationSteps[0].subtitle.slice(0, 700);
+  }
+  const explanationScript = simulationSteps
+    .map((step, index) => `Step ${index + 1} (${step.concept}): ${step.subtitle}`)
+    .join(" ")
+    .slice(0, 2800);
+  topic.description = explanationScript.slice(0, 1400);
+
+  return {
+    topic,
+    problemSets: normalizeProblemSets(topic),
+    openingMessage,
+    generationSource,
+    explanation_script: explanationScript,
+    simulation_steps: simulationSteps
+  };
+}
+
 app.post(
   "/api/ai/simulation",
   authMiddleware,
@@ -3930,74 +3629,54 @@ app.post(
 
   const { topic: requestedTopic, level } = parsed.data;
   const cacheKey = `${SIMULATION_CACHE_SCHEMA_VERSION}::${level}::${requestedTopic.trim().toLowerCase()}`;
-  const cached = simulationResponseCache.get(cacheKey);
-  if (cached && Date.now() - cached.cachedAt <= SIMULATION_CACHE_TTL_MS) {
-    const cachedPayload = JSON.parse(JSON.stringify(cached.payload)) as typeof cached.payload;
-    res.json(cachedPayload);
+
+  const hot = simulationResponseCache.get(cacheKey);
+  if (hot && Date.now() - hot.cachedAt <= SIMULATION_CACHE_TTL_MS) {
+    res.json(JSON.parse(JSON.stringify(hot.payload)) as SimulationResponsePayload);
     return;
   }
 
-  const topic = buildGeneratedTopic(requestedTopic, level);
-  let problemSets = buildGeneratedProblemSets(topic);
-  let explanationScript = "";
-  let simulationSteps: GeminiCanvasStep[] = [];
-  let openingMessage = `Generated a live simulation plan for ${topic.title}.`;
-  let generationSource: "template" | "ai" = "ai";
-  let geminiError = "";
-  try {
-    const llmGenerated = await generateSimulationFromGemini(requestedTopic, level);
-    simulationSteps = llmGenerated.steps;
-  } catch (error) {
-    geminiError = (error as Error).message;
-    console.error("[Simulation] Gemini generation failed, falling back to template:", geminiError);
+  const persisted = getCachedSimulation<SimulationResponsePayload>(cacheKey, SIMULATION_PERSISTED_TTL_MS);
+  if (persisted) {
+    simulationResponseCache.set(cacheKey, { cachedAt: Date.now(), payload: persisted });
+    res.json(persisted);
+    return;
   }
-  if (simulationSteps.length === 0) {
-    generationSource = "template";
-    simulationSteps = convertTemplateToCanvasSteps(topic);
-    openingMessage = geminiError
-      ? `Generated with template fallback because Gemini failed: ${geminiError.slice(0, 120)}`
-      : `Generated with template fallback for ${topic.title}.`;
+
+  let pending = inflightSimulations.get(cacheKey);
+  const isOwner = !pending;
+  if (!pending) {
+    pending = buildSimulationResponse(requestedTopic, level).finally(() => {
+      inflightSimulations.delete(cacheKey);
+    });
+    inflightSimulations.set(cacheKey, pending);
   }
-  const narration = normalizeNarration(simulationSteps.map((step) => step.subtitle));
-  if (narration.length > 0) {
-    topic.narration = narration;
+  const responsePayload = await pending;
+
+  if (isOwner) {
+    await appendHistorySafely({
+      id: randomUUID(),
+      userId: req.auth!.userId,
+      topicId: responsePayload.topic.id,
+      type: "text",
+      input: requestedTopic,
+      output: responsePayload.openingMessage,
+      timestamp: new Date().toISOString(),
+      meta: { source: "simulation-generator", level, generationSource: responsePayload.generationSource }
+    });
+    // Template fallbacks are never cached, so one transient model failure cannot stick.
+    if (responsePayload.generationSource === "ai") {
+      simulationResponseCache.set(cacheKey, {
+        cachedAt: Date.now(),
+        payload: JSON.parse(JSON.stringify(responsePayload)) as SimulationResponsePayload
+      });
+      try {
+        putCachedSimulation(cacheKey, responsePayload);
+      } catch (error) {
+        console.warn("[Simulation] Unable to persist simulation cache. Continuing without it.", error);
+      }
+    }
   }
-  if (simulationSteps[0]?.subtitle) {
-    openingMessage = simulationSteps[0].subtitle.slice(0, 700);
-  }
-  explanationScript = simulationSteps
-    .map((step, index) => `Step ${index + 1} (${step.concept}): ${step.subtitle}`)
-    .join(" ")
-    .slice(0, 2800);
-  topic.description = explanationScript.slice(0, 1400);
-  problemSets = normalizeProblemSets(topic);
-
-  const interaction: InteractionRecord = {
-    id: randomUUID(),
-    userId: req.auth!.userId,
-    topicId: topic.id,
-    type: "text",
-    input: requestedTopic,
-    output: openingMessage,
-    timestamp: new Date().toISOString(),
-    meta: { source: "simulation-generator", level, generationSource }
-  };
-
-  await appendHistorySafely(interaction);
-
-  const responsePayload = {
-    topic,
-    problemSets,
-    openingMessage,
-    generationSource,
-    explanation_script: explanationScript,
-    simulation_steps: simulationSteps
-  };
-
-  simulationResponseCache.set(cacheKey, {
-    cachedAt: Date.now(),
-    payload: JSON.parse(JSON.stringify(responsePayload)) as typeof responsePayload
-  });
 
   res.json(responsePayload);
   })
@@ -4035,12 +3714,12 @@ app.post(
     : `I can help with that question. Start by clarifying the current topic and desired difficulty level.`;
 
   try {
-    const geminiReply = await generateChatReplyFromGemini(topicTitle, message, mode, context);
+    const geminiReply = await generateChatReply(topicTitle, message, mode, context);
     if (geminiReply) {
       responseText = geminiReply;
     }
   } catch (error) {
-    console.error("Gemini chat fallback to template:", error);
+    console.error("Chat fallback to template:", error);
   }
 
   const interaction: InteractionRecord = {
@@ -4191,8 +3870,14 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 });
 
 async function startServer(): Promise<void> {
-  await initializeDynamoDBTables();
-  await initializeCacheState();
+  assertAuthConfigured();
+  initDb();
+  const expiredSessions = deleteExpiredSessions();
+  const prunedCache = pruneSimulationCache(SIMULATION_PERSISTED_TTL_MS);
+  console.log(`[DB] Removed ${expiredSessions} expired sessions and ${prunedCache} stale cache entries.`);
+  if (!isLlmConfigured()) {
+    console.warn("[LLM] Azure OpenAI is not configured; simulations will use the template fallback.");
+  }
   app.listen(port, () => {
     console.log(`Interactive Tech Tutor API running on http://localhost:${port}`);
   });

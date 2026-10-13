@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { writeStore } from "./store.js";
+import { closeDb, importStore, initDb } from "./db.js";
 import { StoreData } from "./types.js";
 
 const INVOCATION_CWD = process.env.INIT_CWD?.trim() || process.cwd();
@@ -38,7 +38,9 @@ async function main(): Promise<void> {
   const parsed = JSON.parse(raw) as unknown;
 
   assertStoreData(parsed);
-  await writeStore(parsed);
+  initDb();
+  importStore(parsed);
+  closeDb();
   console.log(`Backup restored from ${inputPath}`);
 }
 

@@ -10,3 +10,5 @@ apps/api/backups/*.json
 
 .DS_Store
 **/.DS_Store
+apps/api/data/*.db
+apps/api/data/*.db-journal

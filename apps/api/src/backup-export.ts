@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readStore } from "./store.js";
+import { closeDb, exportStore, initDb } from "./db.js";
 
 const API_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const INVOCATION_CWD = process.env.INIT_CWD?.trim() || process.cwd();
@@ -28,7 +28,9 @@ async function main(): Promise<void> {
   const outputPath = resolveOutputPath(process.argv[2]);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
 
-  const store = await readStore();
+  initDb();
+  const store = exportStore();
+  closeDb();
   await fs.writeFile(outputPath, JSON.stringify(store, null, 2), "utf8");
   console.log(`Backup written to ${outputPath}`);
 }

@@ -4,6 +4,7 @@ export type InteractionType = "voice" | "text" | "action" | "visual";
 
 export interface User {
   id: string;
+  name: string;
   email: string;
   passwordHash: string;
   createdAt: string;
