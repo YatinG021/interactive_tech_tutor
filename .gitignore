@@ -7,3 +7,6 @@ apps/api/backups/*.json
 
 .vercel
 .run-logs
+
+.DS_Store
+**/.DS_Store
