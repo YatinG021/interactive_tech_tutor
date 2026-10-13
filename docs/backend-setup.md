@@ -1,4 +1,4 @@
-# Backend Setup Guide
+# Backend setup
 
 Startup requirements, configuration, data layout and test steps for the API in `apps/api`.
 

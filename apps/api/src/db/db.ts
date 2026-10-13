@@ -10,7 +10,7 @@ import {
   User,
   UserPreferences,
   VoiceSettings
-} from "./types.js";
+} from "../types.js";
 
 // The database file lives on the Azure Files share in production (DATA_DIR=/data).
 // Azure Files (SMB) cannot host WAL mode, so the default rollback journal is used on purpose.

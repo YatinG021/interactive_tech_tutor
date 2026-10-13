@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { closeDb, importStore, initDb } from "./db.js";
-import { StoreData } from "./types.js";
+import { closeDb, importStore, initDb } from "../db/db.js";
+import { StoreData } from "../types.js";
 
 const INVOCATION_CWD = process.env.INIT_CWD?.trim() || process.cwd();
 

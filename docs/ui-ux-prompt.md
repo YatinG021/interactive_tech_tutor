@@ -1,6 +1,6 @@
 # UI/UX Generation Prompt: Interactive Tech Tutor (Next.js + Tailwind)
 
-Paste everything inside the box below into a UI generator (v0, Lovable, Claude) or give it to a designer. It describes the product, the design system, every screen, the motion design, and the exact backend contract. The backend contract is in `docs/API_REFERENCE.md`; attach it alongside this prompt.
+Paste everything inside the box below into a UI generator (v0, Lovable, Claude) or give it to a designer. It describes the product, the design system, every screen, the motion design, and the exact backend contract. The backend contract is in `docs/api-reference.md`; attach it alongside this prompt.
 
 The reference implementation of this prompt lives in `apps/frontend`.
 
@@ -208,7 +208,7 @@ voice <select> from speechSynthesis.getVoices() filtered to English, "Preview vo
 changes" → PUT /preferences with the whole object → "Saved ✓".
 
 ════════════════════════════════════════════════════════════════════════
-10. API CONTRACT (summary; see API_REFERENCE.md for full shapes)
+10. API CONTRACT (summary; see api-reference.md for full shapes)
 ════════════════════════════════════════════════════════════════════════
 GET  /health                                   wake the API on app load (it scales to zero)
 POST /auth/register {name?,email,password}     → {token,user}      409 if exists

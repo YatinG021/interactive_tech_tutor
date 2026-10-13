@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-label="Interactive Tech Tutor: a binary search tree drawing itself step by step">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#00d4ff"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.72" cy="0.3" r="0.6">
+      <stop offset="0" stop-color="#00d4ff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#00d4ff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#94a3b8" stroke-opacity="0.08"/>
+    </pattern>
+    <style>
+      .t { font-family: -apple-system, 'Segoe UI', Inter, Helvetica, Arial, sans-serif; }
+      .edge { stroke: #64748b; stroke-width: 3; stroke-dasharray: 160; stroke-dashoffset: 160; animation: draw 9s infinite; }
+      .node { transform-box: fill-box; transform-origin: center; animation: pop 9s infinite; opacity: 0; }
+      .lbl { font: 600 17px -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #05080f; text-anchor: middle; dominant-baseline: central; }
+      .hot { animation: hot 9s infinite; }
+      .cap { opacity: 0; animation: cap 9s infinite; }
+      @keyframes pop { 0%, 4% { opacity: 0; transform: scale(0.3); } 9%, 90% { opacity: 1; transform: scale(1); } 96%, 100% { opacity: 0; } }
+      @keyframes draw { 0%, 8% { stroke-dashoffset: 160; } 18%, 90% { stroke-dashoffset: 0; } 96%, 100% { stroke-dashoffset: 160; } }
+      @keyframes hot { 0%, 38% { fill: #00d4ff; } 44%, 88% { fill: #ff6b35; } 96%, 100% { fill: #00d4ff; } }
+      @keyframes cap { 0%, 30% { opacity: 0; } 36%, 88% { opacity: 1; } 94%, 100% { opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) { .edge, .node, .hot, .cap { animation: none; opacity: 1; stroke-dashoffset: 0; } }
+    </style>
+  </defs>
+
+  <rect width="1200" height="360" rx="24" fill="#05080f"/>
+  <rect width="1200" height="360" rx="24" fill="url(#grid)"/>
+  <rect width="1200" height="360" rx="24" fill="url(#glow)"/>
+
+  <!-- wordmark -->
+  <g class="t">
+    <rect x="64" y="70" width="44" height="44" rx="12" fill="#0b1220" stroke="url(#g)" stroke-width="2"/>
+    <circle cx="78" cy="98" r="5" fill="#00d4ff"/><circle cx="95" cy="85" r="5" fill="#8b5cf6"/><circle cx="95" cy="101" r="4" fill="#ff6b35"/>
+    <path d="M82 95 L91 87 M82 99 L91 101" stroke="#93a3bd" stroke-width="2" stroke-linecap="round"/>
+    <text x="124" y="101" font-size="26" font-weight="700" fill="#e8eef8">Interactive Tech Tutor</text>
+    <text x="64" y="172" font-size="44" font-weight="700" fill="#e8eef8">Watch any tech concept</text>
+    <text x="64" y="224" font-size="46" font-style="italic" font-family="Georgia, 'Times New Roman', serif" fill="url(#g)">come alive.</text>
+    <text x="64" y="272" font-size="18" fill="#93a3bd">Narrated, animated simulations · voice control · tutor chat · three levels</text>
+  </g>
+
+  <!-- a BST drawing itself, then a search path lighting up -->
+  <g transform="translate(700,40)">
+    <line class="edge" style="animation-delay:0.3s" x1="220" y1="50" x2="110" y2="140"/>
+    <line class="edge" style="animation-delay:0.3s" x1="220" y1="50" x2="330" y2="140"/>
+    <line class="edge" style="animation-delay:0.75s" x1="110" y1="140" x2="55" y2="230"/>
+    <line class="edge" style="animation-delay:0.75s" x1="110" y1="140" x2="165" y2="230"/>
+    <line class="edge" style="animation-delay:0.75s" x1="330" y1="140" x2="275" y2="230"/>
+    <line class="edge" style="animation-delay:0.75s" x1="330" y1="140" x2="385" y2="230"/>
+    <g class="node" style="animation-delay:0s"><circle class="hot" cx="220" cy="50" r="26" fill="#00d4ff"/><text class="lbl" x="220" y="50">50</text></g>
+    <g class="node" style="animation-delay:0.45s"><circle class="hot" cx="110" cy="140" r="26" fill="#00d4ff"/><text class="lbl" x="110" y="140">30</text></g>
+    <g class="node" style="animation-delay:0.45s"><circle cx="330" cy="140" r="26" fill="#00d4ff"/><text class="lbl" x="330" y="140">70</text></g>
+    <g class="node" style="animation-delay:0.9s"><circle cx="55" cy="230" r="26" fill="#00d4ff"/><text class="lbl" x="55" y="230">20</text></g>
+    <g class="node" style="animation-delay:0.9s"><circle cx="165" cy="230" r="26" fill="#22c55e"/><text class="lbl" x="165" y="230">40</text></g>
+    <g class="node" style="animation-delay:0.9s"><circle cx="275" cy="230" r="26" fill="#00d4ff"/><text class="lbl" x="275" y="230">60</text></g>
+    <g class="node" style="animation-delay:0.9s"><circle cx="385" cy="230" r="26" fill="#00d4ff"/><text class="lbl" x="385" y="230">80</text></g>
+    <g class="cap t"><rect x="96" y="276" width="250" height="34" rx="10" fill="#0b1220" stroke="#94a3b8" stroke-opacity="0.3"/>
+      <text x="221" y="298" font-size="15" fill="#e8eef8" text-anchor="middle">search 40: 50 → 30 → 40</text></g>
+  </g>
+</svg>

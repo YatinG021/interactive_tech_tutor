@@ -31,9 +31,9 @@ import {
   touchLastLogin,
   upsertPreferences,
   upsertProgress
-} from "./db.js";
-import { generateJson, generateText, isLlmConfigured } from "./llm.js";
-import { isTtsConfigured, synthesize, TtsError } from "./tts.js";
+} from "./db/db.js";
+import { generateJson, generateText, isLlmConfigured } from "./services/llm.js";
+import { isTtsConfigured, synthesize, TtsError } from "./services/tts.js";
 import {
   buildChatPrompt,
   buildChatSystemPrompt,
@@ -47,8 +47,8 @@ import {
   OutlineStep,
   VOICE_ACTION_SCHEMA,
   VOICE_ACTION_SYSTEM_PROMPT
-} from "./prompts.js";
-import { LEVELS, PROBLEM_SETS, TOPICS } from "./seed.js";
+} from "./services/prompts.js";
+import { LEVELS, PROBLEM_SETS, TOPICS } from "./db/seed.js";
 import {
   DifficultyLevel,
   InteractionRecord,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getCachedSpeech, putCachedSpeech, speechCharsSince } from "./db.js";
+import { getCachedSpeech, putCachedSpeech, speechCharsSince } from "../db/db.js";
 
 // Sarvam AI text-to-speech (https://docs.sarvam.ai/api-reference-docs/text-to-speech/convert).
 // Every clip is cached by (model, speaker, text), so a sentence is paid for once no matter how many

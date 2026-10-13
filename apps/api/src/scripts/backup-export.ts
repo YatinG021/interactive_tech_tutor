@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { closeDb, exportStore, initDb } from "./db.js";
+import { closeDb, exportStore, initDb } from "../db/db.js";
 
-const API_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const API_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const INVOCATION_CWD = process.env.INIT_CWD?.trim() || process.cwd();
 
 function nowStamp(): string {

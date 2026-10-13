@@ -1,4 +1,4 @@
-import { DifficultyLevel, ProblemSet, Topic } from "./types.js";
+import { DifficultyLevel, ProblemSet, Topic } from "../types.js";
 
 export const LEVELS: DifficultyLevel[] = ["beginner", "intermediate", "advanced"];
 

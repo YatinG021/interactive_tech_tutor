@@ -2,7 +2,7 @@ import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
-import { createSession, findSession } from "./db.js";
+import { createSession, findSession } from "./db/db.js";
 
 const scryptAsync = promisify(scrypt) as (
   password: string,

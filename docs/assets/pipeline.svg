@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="Simulation pipeline: topic, outline, parallel step canvases, repair, cache, player">
+  <defs>
+    <style>
+      .t { font-family: -apple-system, 'Segoe UI', Inter, Helvetica, Arial, sans-serif; }
+      .box { fill: #0f1829; stroke: #94a3b8; stroke-opacity: 0.28; }
+      .h { font-size: 16px; font-weight: 700; fill: #e8eef8; text-anchor: middle; }
+      .s { font-size: 12.5px; fill: #93a3bd; text-anchor: middle; }
+      .wire { stroke: #334155; stroke-width: 2; fill: none; }
+      .dot { fill: #00d4ff; }
+      .bar { fill: url(#bar); transform-box: fill-box; transform-origin: left; animation: fill 6s infinite; }
+      @keyframes fill { 0%, 22% { transform: scaleX(0); } 52%, 92% { transform: scaleX(1); } 100% { transform: scaleX(0); } }
+      @media (prefers-reduced-motion: reduce) { .bar { animation: none; } animateMotion { display: none; } }
+    </style>
+    <linearGradient id="bar" x1="0" x2="1"><stop offset="0" stop-color="#00d4ff" stop-opacity="0.55"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0.55"/></linearGradient>
+  </defs>
+  <rect width="1200" height="300" rx="20" fill="#05080f"/>
+
+  <g class="t">
+    <!-- 1 topic -->
+    <rect class="box" x="30" y="105" width="150" height="90" rx="14"/>
+    <text class="h" x="105" y="143">Topic</text><text class="s" x="105" y="166">"How DNS works"</text>
+    <!-- 2 outline -->
+    <rect class="box" x="230" y="105" width="170" height="90" rx="14"/>
+    <text class="h" x="315" y="143">Outline</text><text class="s" x="315" y="166">1 structured call</text>
+    <!-- 3 parallel canvases -->
+    <rect class="box" x="450" y="30" width="250" height="240" rx="14"/>
+    <text class="h" x="575" y="58">Step canvases</text><text class="s" x="575" y="78">all steps in parallel</text>
+    <g>
+      <rect x="470" y="96"  width="210" height="22" rx="6" fill="#16223a"/><rect class="bar" x="470" y="96"  width="210" height="22" rx="6" style="animation-delay:0s"/>
+      <rect x="470" y="126" width="210" height="22" rx="6" fill="#16223a"/><rect class="bar" x="470" y="126" width="180" height="22" rx="6" style="animation-delay:.15s"/>
+      <rect x="470" y="156" width="210" height="22" rx="6" fill="#16223a"/><rect class="bar" x="470" y="156" width="200" height="22" rx="6" style="animation-delay:.3s"/>
+      <rect x="470" y="186" width="210" height="22" rx="6" fill="#16223a"/><rect class="bar" x="470" y="186" width="160" height="22" rx="6" style="animation-delay:.1s"/>
+      <rect x="470" y="216" width="210" height="22" rx="6" fill="#16223a"/><rect class="bar" x="470" y="216" width="190" height="22" rx="6" style="animation-delay:.25s"/>
+    </g>
+    <!-- 4 repair -->
+    <rect class="box" x="750" y="105" width="170" height="90" rx="14"/>
+    <text class="h" x="835" y="143">Repair</text><text class="s" x="835" y="166">≤ 3 weak steps, parallel</text>
+    <!-- 5 cache + player -->
+    <rect class="box" x="970" y="105" width="200" height="90" rx="14"/>
+    <text class="h" x="1070" y="143">Cache → Player</text><text class="s" x="1070" y="166">SQLite · canvas · Sarvam voice</text>
+  </g>
+
+  <path id="p1" class="wire" d="M180 150 H230"/>
+  <path id="p2" class="wire" d="M400 150 H450"/>
+  <path id="p3" class="wire" d="M700 150 H750"/>
+  <path id="p4" class="wire" d="M920 150 H970"/>
+  <path id="all" d="M180 150 H230 M400 150 H450 M700 150 H750 M920 150 H970" fill="none"/>
+
+  <circle class="dot" r="5"><animateMotion dur="6s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.12;1" calcMode="linear"><mpath href="#p1"/></animateMotion></circle>
+  <circle class="dot" r="5"><animateMotion dur="6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.16;0.24;1" calcMode="linear"><mpath href="#p2"/></animateMotion></circle>
+  <circle class="dot" r="5" fill="#8b5cf6"><animateMotion dur="6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.56;0.66;1" calcMode="linear"><mpath href="#p3"/></animateMotion></circle>
+  <circle class="dot" r="5" fill="#22c55e"><animateMotion dur="6s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.74;0.84;1" calcMode="linear"><mpath href="#p4"/></animateMotion></circle>
+</svg>
