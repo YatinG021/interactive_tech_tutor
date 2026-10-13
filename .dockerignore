@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+**/*.db
+**/*.db-journal
+.git
+.github
+apps/web/*
+!apps/web/package.json
+apps/api/data
+apps/api/backups
+**/.DS_Store

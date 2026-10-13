@@ -1,0 +1,80 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/api/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  APP_NAME: itt-api
+  RESOURCE_GROUP: itt-rg
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # The image is always built. Rolling it out needs the Azure login secret.
+      HAS_AZURE: ${{ secrets.AZURE_CREDENTIALS != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/interactive-tech-tutor-api" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Azure login
+        if: env.HAS_AZURE == 'true'
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Roll out new revision
+        if: env.HAS_AZURE == 'true'
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+              --image "$IMAGE:${{ github.sha }}" \
+              --set-env-vars DEPLOYED_COMMIT=${{ github.sha }}
+
+            URL="https://$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)"
+            echo "Smoke testing $URL/health for ${{ github.sha }}"
+            for i in $(seq 1 40); do
+              if curl -sf "$URL/health" | grep -q "${{ github.sha }}"; then
+                echo "New revision is live."
+                exit 0
+              fi
+              sleep 10
+            done
+            echo "::error::new revision never reported commit ${{ github.sha }}"
+            exit 1
