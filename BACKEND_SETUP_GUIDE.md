@@ -16,7 +16,7 @@ Copy `apps/api/.env.example` to `apps/api/.env`.
 | `AZURE_OPENAI_API_VERSION` | No | `2024-10-21` | Azure OpenAI API version |
 | `AZURE_OPENAI_TIMEOUT_MS` | No | `60000` | Per-request timeout |
 | `LLM_MAX_CONCURRENCY` | No | `6` | Max in-flight model calls for the whole process |
-| `AZURE_OPENAI_REASONING_EFFORT` | No | unset | Only for reasoning deployments that accept `reasoning_effort` |
+| `AZURE_OPENAI_OVERFLOW_DEPLOYMENT` | No | unset | Second deployment used when the primary returns 429 or 5xx |
 | `JWT_SECRET` | Yes in production | dev value | Signs session tokens. The server refuses to start without it when `NODE_ENV=production` |
 | `DATA_DIR` | No | `./data` | Directory holding `app.db`. In Azure, the mounted Azure Files share (`/data`) |
 | `CACHE_VERSION` | No | `3` | Bump to invalidate every cached simulation |
