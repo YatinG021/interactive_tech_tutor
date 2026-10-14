@@ -22,6 +22,10 @@
 **Type any technical topic and watch it explained as a narrated, animated, step-by-step simulation.**<br/>
 Steer it with your voice, ask a tutor follow-up questions, and pass a quiz at each of three levels.
 
+### 🚀 [Try the live app → yating021.github.io/interactive_tech_tutor](https://yating021.github.io/interactive_tech_tutor/)
+
+<sub>New to the project? Read the <a href="docs/beginner-guide.md">beginner's guide</a>.</sub>
+
 </div>
 
 ---
